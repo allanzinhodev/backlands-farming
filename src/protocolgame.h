@@ -1,0 +1,521 @@
+// Copyright 2023 The Forgotten Server Authors. All rights reserved.
+// Use of this source code is governed by the GPL-2.0 License that can be found in the LICENSE file.
+
+#ifndef FS_PROTOCOLGAME_H
+#define FS_PROTOCOLGAME_H
+
+#include "chat.h"
+#include "creature.h"
+#include "packet_backlog.h"
+#include "protocol.h"
+#include "tasks.h"
+#include "zoneweather.h"
+
+#include <array>
+#include <optional>
+#include <string>
+#include <string_view>
+
+class NetworkMessage;
+class Player;
+class Game;
+class House;
+class Container;
+class Item;
+class Tile;
+class Connection;
+class ProtocolGame;
+struct BestiaryCreatureInfo;
+struct ProtocolGameCustomPingTestAccess;
+struct ProtocolGameAstraRegenerationTestAccess;
+struct ProtocolGameSpellCooldownTestAccess;
+using ProtocolGame_ptr = std::shared_ptr<ProtocolGame>;
+class ProtocolSpectator;
+
+extern Game g_game;
+
+namespace BestiaryNotificationProtocol {
+bool writeProgress(NetworkMessage& msg, const BestiaryCreatureInfo& info, uint8_t progressLevel, bool isBoss,
+                   bool includeCreatureData);
+}
+
+struct TextMessage
+{
+	MessageClasses type = MESSAGE_STATUS_DEFAULT;
+	std::string text;
+	Position position;
+	uint16_t channelId = 0;
+	struct
+	{
+		int32_t value = 0;
+		TextColor_t color = TEXTCOLOR_NONE;
+	} primary, secondary;
+
+	TextMessage() = default;
+	TextMessage(MessageClasses type, std::string_view text) : type{type}, text{text} {}
+};
+
+inline constexpr auto OTCV8_NAME = "OTCv8";
+inline constexpr auto OTCV8_LENGTH = 5;
+
+class ProtocolGame final : public Protocol
+{
+public:
+	void sendAmbientSound(uint32_t ambientId);
+	void sendSingleSoundEffect(const Position& pos, uint16_t soundId, uint8_t source = 0);
+	void sendDoubleSoundEffect(const Position& pos, uint16_t mainSoundId, uint16_t secondarySoundId, uint8_t source = 0);
+
+	// static protocol information
+	enum
+	{
+		server_sends_first = true
+	};
+	enum
+	{
+		protocol_identifier = 0
+	}; // Not required as we send first
+	enum
+	{
+		use_checksum = true
+	};
+	static const char* protocol_name() { return "gameworld protocol"; }
+
+	explicit ProtocolGame(Connection_ptr connection) : Protocol(connection) {}
+	~ProtocolGame() override;
+
+	void login(uint32_t characterId, uint32_t accountId, OperatingSystem_t operatingSystem);
+	void spectate(const std::string& name, const std::string& password, uint32_t clientIP);
+	static void recordRejectedCastPassword(uint32_t ip);
+	void logout(bool displayEffect, bool forced);
+
+	uint16_t getVersion() const { return version; }
+	bool canSendAstraItemState() const;
+	bool canSendAstraItemMetadata() const;
+	bool canSendPackedPlayerInventory() const;
+	bool shouldSendAstraQuiverCountU16() const;
+	static void rebuildItemValuesCache();
+	static void invalidateItemValuesCache();
+
+	static uint32_t spectatorId;
+	static std::set<std::string> spectatorNames;
+	const std::string getSpectatorName() const { return spectator_name; }
+	void setSpectatorName(const std::string& new_name) { spectator_name = new_name; }
+
+private:
+	ProtocolGame_ptr getThis() { return std::static_pointer_cast<ProtocolGame>(shared_from_this()); }
+	void connect(uint32_t playerId, OperatingSystem_t operatingSystem);
+	void finishLogin(uint32_t reservedGuid, uint32_t accountId, bool loaded, OperatingSystem_t operatingSystem);
+	void disconnectClient(std::string_view message) const;
+	void dispatchCancelMessage(ReturnValue message) const;
+	void writeToOutputBuffer(const NetworkMessage& msg);
+
+	void release() override;
+
+	std::pair<bool, uint32_t> isKnownCreature(uint32_t id);
+
+	bool canSee(int32_t x, int32_t y, int32_t z) const;
+	bool canSee(const Creature*) const;
+	bool canSee(const Position& pos) const;
+
+	// we have all the parse methods
+	void parsePacket(NetworkMessage& msg) override;
+	void parsePacketOnDispatcher(NetworkMessage_ptr& packet);
+	void onRecvFirstMessage(NetworkMessage& msg) override;
+	void onConnect() override;
+
+	// Parse methods
+	void parseAutoWalk(NetworkMessage& msg);
+	void parseSetOutfit(NetworkMessage& msg);
+	void parseInspectionObject(NetworkMessage& msg);
+	void parseCyclopediaCharacterInfo(NetworkMessage& msg);
+	void parseSetMonsterPodium(NetworkMessage& msg);
+	void parseSay(NetworkMessage& msg);
+	void parseSelectSpellAim(NetworkMessage& msg);
+	void parseLookAt(NetworkMessage& msg);
+	void parseLookInBattleList(NetworkMessage& msg);
+	void parseAttack(NetworkMessage& msg);
+	void parseFollow(NetworkMessage& msg);
+
+	void parseBugReport(NetworkMessage& msg);
+	void parseRuleViolationReport(NetworkMessage& msg);
+
+	void parseThrow(NetworkMessage& msg);
+	void parseHotkeyEquip(NetworkMessage& msg);
+	void parseUseItemEx(NetworkMessage& msg);
+	void parseUseWithCreature(NetworkMessage& msg);
+	void parseUseItem(NetworkMessage& msg);
+	void parseBrowseField(NetworkMessage& msg);
+	void parseSeekInContainer(NetworkMessage& msg);
+	void parseCloseContainer(NetworkMessage& msg);
+	void parseUpArrowContainer(NetworkMessage& msg);
+	void parseUpdateContainer(NetworkMessage& msg);
+	void parseQuickLoot(NetworkMessage& msg);
+	void parseLootContainer(NetworkMessage& msg);
+	void parseQuickLootBlackWhitelist(NetworkMessage& msg);
+	void parseTextWindow(NetworkMessage& msg);
+	void parseHouseWindow(NetworkMessage& msg);
+
+	void parseLookInShop(NetworkMessage& msg);
+	void parsePlayerPurchase(NetworkMessage& msg);
+	void parsePlayerSale(NetworkMessage& msg);
+
+	void parseInviteToParty(NetworkMessage& msg);
+	void parseJoinParty(NetworkMessage& msg);
+	void parseRevokePartyInvite(NetworkMessage& msg);
+	void parsePassPartyLeadership(NetworkMessage& msg);
+	void parseEnableSharedPartyExperience(NetworkMessage& msg);
+
+	void parseModalWindowAnswer(NetworkMessage& msg);
+	void parseImbuementDurations(NetworkMessage& msg);
+	void parseCharacterBazaar(NetworkMessage& msg);
+
+	// Game store
+	void parseStoreOpen(NetworkMessage& msg);
+	void parseStorePurchase(NetworkMessage& msg);
+	void parseStoreHistory(NetworkMessage& msg);
+	void parseStoreTransfer(NetworkMessage& msg);
+
+
+	// trade methods
+	void parseRequestTrade(NetworkMessage& msg);
+	void parseLookInTrade(NetworkMessage& msg);
+
+	// VIP methods
+	void parseAddVip(NetworkMessage& msg);
+	void parseRemoveVip(NetworkMessage& msg);
+
+	void parseRotateItem(NetworkMessage& msg);
+	void parseWrapableItem(NetworkMessage& msg);
+
+	// Channel tabs
+	void parseChannelInvite(NetworkMessage& msg);
+	void parseChannelExclude(NetworkMessage& msg);
+	void parseOpenChannel(NetworkMessage& msg);
+	void parseOpenPrivateChannel(NetworkMessage& msg);
+	void parseCloseChannel(NetworkMessage& msg);
+
+	// Send functions
+	void sendChannelMessage(std::string_view author, std::string_view text, SpeakClasses type, uint16_t channel);
+	void sendClosePrivate(uint16_t channelId);
+	void sendCreatePrivateChannel(uint16_t channelId, std::string_view channelName);
+	void sendChannelsDialog();
+	void sendChannel(uint16_t channelId, std::string_view channelName);
+	void sendOpenPrivateChannel(std::string_view receiver);
+	void sendToChannel(const Creature* creature, SpeakClasses type, std::string_view text, uint16_t channelId);
+	void sendPrivateMessage(const Player* speaker, SpeakClasses type, std::string_view text);
+	void sendIcons(uint16_t icons);
+	void sendIcons(uint64_t icons, IconBakragore_t bakragoreIcon = IconBakragore_None);
+	void sendFYIBox(std::string_view message);
+
+	void sendDistanceShoot(const Position& from, const Position& to, uint16_t type);
+	void sendMagicEffect(const Position& pos, uint16_t type);
+	void sendCreatureHealth(const Creature* creature);
+	void sendSkills();
+	void sendPing();
+	void sendCustomClientPing(uint32_t pingId);
+	void sendCreatureTurn(const Creature* creature, uint32_t stackpos);
+	void sendCreatureSay(const Creature* creature, SpeakClasses type, std::string_view text,
+	                     const Position* pos = nullptr);
+
+	void sendCancelWalk();
+	void sendChangeSpeed(const Creature* creature, uint32_t speed);
+	void sendCancelTarget();
+	void sendCreatureOutfit(const Creature* creature, const Outfit_t& outfit);
+	void sendStats();
+	void sendBasicData();
+	void sendTextMessage(const TextMessage& message);
+	void sendReLoginWindow();
+
+	void sendTutorial(uint8_t tutorialId);
+	void sendAddMarker(const Position& pos, uint8_t markType, std::string_view desc);
+
+	void sendCreatureWalkthrough(const Creature* creature, bool walkthrough);
+	void sendCreatureShield(const Creature* creature);
+	void sendCreatureSkull(const Creature* creature);
+	void sendCreatureEmblem(const Creature* creature);
+	void sendCreatureIcon(const Creature* creature);
+	void sendCreatureEchoRaidVisual(const Creature* creature, bool force = false);
+	void sendVisibleEchoRaidVisuals(const Position& centerPos);
+	void sendCreatureVocation(const Creature* creature);
+	void sendVisiblePlayerVocations(const Position& centerPos);
+
+	void sendShop(const ShopInfoList& itemList);
+	void sendCloseShop();
+	void sendSaleItemList(const std::list<ShopInfo>& shop);
+	void sendTradeItemRequest(std::string_view traderName, const Item* item, bool ack);
+	void sendCloseTrade();
+
+	void sendTextWindow(uint32_t windowTextId, Item* item, uint16_t maxlen, bool canWrite);
+	void sendTextWindow(uint32_t windowTextId, uint16_t itemId, std::string_view text);
+	void sendHouseWindow(uint32_t windowTextId, std::string_view text);
+	void sendOutfitWindow();
+	void sendItemInspection(std::shared_ptr<Item> item = nullptr, uint16_t itemId = 0, uint8_t itemCount = 1,
+	                        uint8_t inspectionType = INSPECT_NORMALOBJECT);
+	void sendCyclopediaItemSummary();
+	void sendCyclopediaCharacterAppearances();
+	void sendCyclopediaStoreSummary();
+	void sendCyclopediaCharacterStats(uint8_t type);
+	void sendCyclopediaRecentDeaths(uint16_t entriesPerPage, uint16_t page);
+	void sendCyclopediaRecentPvPKills(uint16_t entriesPerPage, uint16_t page);
+	void sendMonsterPodiumWindow(const Item* podium, const Position& position, uint16_t itemId, uint8_t stackPos);
+
+	void sendUpdatedVIPStatus(uint32_t guid, VipStatus_t newStatus);
+	void sendVIP(uint32_t guid, std::string_view name, VipStatus_t status);
+
+	void sendFightModes();
+
+	void sendAnimatedText(std::string_view message, const Position& pos, TextColor_t color);
+
+	void sendCreatureLight(const Creature* creature);
+	void sendWorldLight(LightInfo lightInfo);
+
+	void sendCreatureSquare(const Creature* creature, SquareColor_t color);
+	void sendCreatureWeaponAttackMark(const Creature* target, uint8_t weaponType);
+	void sendSpellCooldown(uint16_t spellId, uint32_t time);
+	void sendSpellGroupCooldown(SpellGroup_t groupId, uint32_t time);
+	void sendUseItemCooldown(uint32_t time);
+	void sendStanceProtocol(const std::vector<uint16_t>& spellIds);
+	void sendBannerType(Banner_t bannerType);
+	void sendScreenshotAndBannerUnlockedCosmetic(std::string_view skinName, uint16_t lookType, uint8_t skinType);
+	void sendScreenshotAndBannerUpLevel(uint16_t level);
+	void sendScreenshotAndBannerUpSkill(skills_t skill, uint16_t level);
+	void sendScreenshotAndBannerProgressRace(const BestiaryCreatureInfo& info, uint8_t progressLevel,
+	                                         bool isBoss = false);
+	void sendEchoWardenReward(uint16_t raceId, uint32_t charmPoints);
+	void sendExtendedOpcode(uint8_t opcode, std::string_view data);
+	void sendBlessingWindow();
+	void sendBlessStatus();
+
+	// Game store
+	void sendStoreCatalog();
+	void sendStoreError(std::string_view message);
+	void sendStorePurchaseSuccess(uint32_t offerId, std::string_view message, uint32_t newBalance);
+	void sendStoreHistory();
+
+
+	// tiles
+	void sendMapDescription(const Position& pos);
+	void refreshWorldView();
+	void sendZoneWeather(const Position& position, bool force = false);
+
+	void sendAddTileItem(const Position& pos, uint32_t stackpos, const Item* item);
+	void sendUpdateTileItem(const Position& pos, uint32_t stackpos, const Item* item);
+	void sendRemoveTileThing(const Position& pos, uint32_t stackpos);
+	void sendUpdateTileCreature(const Position& pos, uint32_t stackpos, const Creature* creature);
+	void sendUpdateTile(const Tile* tile, const Position& pos);
+
+	void sendAddCreature(const Creature* creature, const Position& pos, int32_t stackpos,
+	                     MagicEffectClasses magicEffect = CONST_ME_NONE);
+	void sendMoveCreature(const Creature* creature, const Position& newPos, int32_t newStackPos, const Position& oldPos,
+	                      int32_t oldStackPos, bool teleport);
+
+	// containers
+	void sendAddContainerItem(uint8_t cid, const Item* item);
+	void sendAddContainerItem(uint8_t cid, uint16_t slot, const Item* item);
+	void sendUpdateContainerItem(uint8_t cid, uint16_t slot, const Item* item);
+	void sendRemoveContainerItem(uint8_t cid, uint16_t slot);
+	void sendRemoveContainerItem(uint8_t cid, uint16_t slot, const Item* lastItem);
+
+	void sendContainer(uint8_t cid, const Container* container, bool hasParent, uint16_t firstIndex);
+	void sendCloseContainer(uint8_t cid);
+	void sendLootContainers();
+
+	// inventory
+	void sendInventoryItem(slots_t slot, const Item* item);
+	void sendPlayerInventory();
+	void sendImbuementDurations(slots_t updatedSlot = CONST_SLOT_WHEREEVER, const Item* updatedItem = nullptr);
+	void sendCharmActivated(uint8_t charmId);
+	void sendKillTrackerUpdate(const std::shared_ptr<Container>& corpse, std::string_view monsterName,
+	                           const Outfit_t& monsterOutfit);
+	void sendImpactTracker(uint8_t analyzerType, uint32_t amount, CombatType_t combatType,
+	                       std::string_view targetName = {});
+	void sendItemValues();
+
+	// messages
+	void sendModalWindow(const ModalWindow& modalWindow);
+
+	// Help functions
+
+	// translate a tile to client-readable format
+	void GetTileDescription(const Tile* tile, NetworkMessage& msg);
+
+	// translate a floor to client-readable format
+	void GetFloorDescription(NetworkMessage& msg, int32_t x, int32_t y, int32_t z, int32_t width, int32_t height,
+	                         int32_t offset, int32_t& skip);
+
+	// translate a map area to client-readable format
+	void GetMapDescription(int32_t x, int32_t y, int32_t z, int32_t width, int32_t height, NetworkMessage& msg);
+
+	void AddCreature(NetworkMessage& msg, const Creature* creature, bool known, uint32_t remove);
+	void AddPlayerStats(NetworkMessage& msg);
+	static uint16_t getRegenerationTimeSeconds(int32_t ticks);
+	void AddOutfit(NetworkMessage& msg, const Outfit_t& outfit);
+	void AddPlayerSkills(NetworkMessage& msg);
+	void AddWorldLight(NetworkMessage& msg, LightInfo lightInfo);
+	void AddCreatureLight(NetworkMessage& msg, const Creature* creature);
+	void AddCreatureIcon(NetworkMessage& msg, const Creature* creature);
+
+	// tiles
+	static void RemoveTileThing(NetworkMessage& msg, const Position& pos, uint32_t stackpos);
+
+	void MoveUpCreature(NetworkMessage& msg, const Creature* creature, const Position& newPos, const Position& oldPos);
+	void MoveDownCreature(NetworkMessage& msg, const Creature* creature, const Position& newPos,
+	                      const Position& oldPos);
+
+	// shop
+	void AddShopItem(NetworkMessage& msg, const ShopInfo& item);
+
+	// otclient
+	void parseExtendedOpcode(NetworkMessage& msg);
+	bool consumeHelperCastOnFoot()
+	{
+		const bool value = helperCastOnFootNextSay;
+		helperCastOnFootNextSay = false;
+		return value;
+	}
+
+	// OTCv8
+	void sendFeatures(bool advertiseAstraItemState = false);
+	bool shouldSendQuickLootFlags() const;
+	bool shouldSendContainerTypes() const;
+	bool shouldSendContainerPagination() const;
+	void appendItem(NetworkMessage& msg, const Item* item) const;
+	void appendItem(NetworkMessage& msg, uint16_t itemId, uint8_t count) const;
+	bool shouldPaginateContainer(const Container* container) const;
+	bool shouldSendItemTierByte() const;
+	bool shouldSendThingUpgradeClassification() const;
+	bool shouldSendItemTierData() const;
+	bool usesExtendedSpellIds() const;
+	bool usesExtendedSpellCooldownIds() const;
+	void sendNewPing(uint32_t pingId);
+	void parseNewPing(NetworkMessage& msg);
+	void parseCustomClientPing(NetworkMessage& msg);
+	static uint32_t nextCustomPingId(uint32_t current);
+	static uint32_t customPingSeedFromEntropy(uint64_t entropy);
+	static uint32_t nextCustomPingSeed();
+	static std::optional<uint32_t> readCustomPingId(NetworkMessage& msg);
+	void cleanupCustomPings(int64_t now);
+	bool registerCustomPing(uint32_t id, int64_t now);
+
+	enum class CustomPongResult : uint8_t
+	{
+		Accepted,
+		Duplicate,
+		Unknown,
+	};
+	CustomPongResult receiveCustomPong(uint32_t id, int64_t now);
+
+	friend class Player;
+	friend class ProtocolSpectator;
+	friend class SpySystem;
+	friend struct ProtocolGameCustomPingTestAccess;
+	friend struct ProtocolGameAstraRegenerationTestAccess;
+	friend struct ProtocolGameSpellCooldownTestAccess;
+	friend struct ProtocolGameMovementTestAccess;
+
+	//cast
+	void spectatorTurn(uint8_t direction);
+	void parseSpectatorSay(NetworkMessage& msg);
+	void spectatorSay(std::string_view text, uint16_t channelId);
+	void sendCastChannel();
+	void syncOpenContainers();
+	void parseSwitchCast(uint8_t direction); // 0 = previous, 1 = next
+	void sendWelcomeMessage();
+	void sendTextMessage(MessageClasses mclass, const std::string& message);
+	bool canProcessCastSwitch();
+	bool shouldResyncCastChannelOnSwitch() const;
+
+	bool isSpectator = false;
+	std::string spectator_name = "";
+
+	// ─── Spy System ──────────────────────────────────────────────────
+	bool spyActive_ = false;           // GOD is currently spying someone
+	Position spyViewportPos_;           // viewport center while spying
+	uint32_t spyTargetCreatureId_ = 0; // creature ID of the spy target
+
+	void setSpyMode(bool active, const Position& viewport = {}, uint32_t targetCreatureId = 0) {
+		spyActive_ = active;
+		spyViewportPos_ = viewport;
+		spyTargetCreatureId_ = targetCreatureId;
+	}
+
+	bool isSpyActive() const { return spyActive_; }
+
+	std::unordered_set<uint32_t> knownCreatureSet;
+	std::unordered_set<uint32_t> pendingCreatureEmblems;
+	std::shared_ptr<Player> player;
+	tfs::net::PacketBacklog packetBacklog;
+
+	uint32_t eventConnect = 0;
+	int64_t lastCharacterHistoryRequest = 0;
+	int64_t lastCharacterItemSummaryRequest = 0;
+	uint32_t challengeTimestamp = 0;
+	uint16_t version = CLIENT_VERSION_MIN;
+
+	uint8_t challengeRandom = 0;
+
+	// Helpers so we don't need to bind every time
+	template <typename Callable, typename... Args>
+	void addGameTaskWithStats(Callable&& function, const std::string& function_str, const std::string& extra_info, Args&&... args) {
+		g_dispatcher.addTask(createTaskWithStats(std::bind(std::forward<Callable>(function), &g_game, std::forward<Args>(args)...), function_str, extra_info));
+	}
+
+	template <typename Callable, typename... Args>
+	void addGameTaskTimedWithStats(uint32_t delay, Callable&& function, const std::string& function_str, const std::string& extra_info, Args&&... args) {
+		g_dispatcher.addTask(createTaskWithStats(delay, std::bind(std::forward<Callable>(function), &g_game, std::forward<Args>(args)...), function_str, extra_info));
+	}
+
+	bool isOTCv8 = false;
+	bool isMehah = false;
+	bool isOTC = false;
+	bool isAstraClient = false;
+	bool isFonticakClient = false;
+	bool supportsGameStoreHighlights = false;
+	bool supportsContainerTypes = false;
+	bool supportsAstraSingleCreatureMarks = false;
+	bool supportsAstraEchoRaidVisuals = false;
+	bool supportsAstraStoreBasePrice = false;
+	bool supportsAstraStoreCatalogChunks = false;
+	bool supportsAstraBestiaryBannerCreatureData = false;
+	bool supportsAstraExtendedSpellIds = false;
+	bool supportsAstraShopBuyAmountU16 = false;
+	bool supportsZoneWeather = false;
+	bool supportsDllZoneWeather = false;
+	bool zoneWeatherFeatureEnabled = false;
+	std::unordered_map<uint32_t, EchoRaidVisualState> echoRaidVisualCache;
+	uint32_t dllWeatherSequence = 0;
+	bool isUsingFonticakClient() const { return isFonticakClient; }
+	bool supportsAstraCreatureIcons() const { return isAstraClient; }
+	bool supportsCreatureIcons() const { return supportsAstraCreatureIcons(); }
+	bool supportsNativeZoneWeather() const
+	{
+		return (clientOperatingSystem == CLIENTOS_CUSTOM_DLL && supportsDllZoneWeather) ||
+		       isAstraClient || (isOTCv8 && supportsZoneWeather);
+	}
+	bool helperCastOnFootNextSay = false;
+	OperatingSystem_t clientOperatingSystem = CLIENTOS_NONE;
+	bool useItemTierByte = false;
+	bool debugAssertSent = false;
+	bool acceptPackets = false;
+	bool imbuementTrackerOpen = false;
+	std::optional<WeatherState> lastZoneWeather;
+	uint32_t customPingSequence = 0;
+	// Sixteen slots cover more than the 30-second TTL at a five-second heartbeat.
+	static constexpr std::size_t CUSTOM_PING_MAX_TRACKED = 16;
+	static constexpr int64_t CUSTOM_PING_TTL_MS = 30'000;
+	struct CustomPingEntry
+	{
+		uint32_t id = 0;
+		int64_t stateSince = 0;
+		bool acknowledgementSent = false;
+	};
+	std::array<CustomPingEntry, CUSTOM_PING_MAX_TRACKED> customPings = {};
+	int64_t nextCastSwitchTime = 0;
+	int64_t nextCastSwitchCooldownMessageTime = 0;
+
+	int64_t moveWindowStart = 0;
+	uint16_t movePacketCount = 0;
+	uint8_t speedhackWarnings = 0;
+};
+
+#endif

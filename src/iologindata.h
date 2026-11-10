@@ -1,0 +1,130 @@
+// Copyright 2023 The Forgotten Server Authors. All rights reserved.
+// Use of this source code is governed by the GPL-2.0 License that can be found in the LICENSE file.
+
+#ifndef FS_IOLOGINDATA_H
+#define FS_IOLOGINDATA_H
+
+#include "account.h"
+#include "database.h"
+#include "observer_ptr.h"
+#include "player.h"
+#include <optional>
+#include <unordered_set>
+#include <vector>
+
+using ItemBlockList = std::list<std::pair<int32_t, ObserverPtr<Item>>>;
+
+class IOLoginData
+{
+public:
+	enum class AuthenticationResult : uint8_t
+	{
+		Success,
+		Rejected,
+		DatabaseError,
+	};
+
+	struct GameworldAuthenticationResult
+	{
+		AuthenticationResult status = AuthenticationResult::Rejected;
+		uint32_t accountId = 0;
+		uint32_t characterId = 0;
+		bool cast = false;
+	};
+
+	static Account loadAccount(uint32_t accno);
+
+	// Canonical per-account brute-force key: resolved account name when the
+	// identifier matches name or email, otherwise the trimmed lower-cased input.
+	static std::string accountLimiterKey(std::string_view identifier);
+
+	static AuthenticationResult loginserverAuthentication(std::string_view name, std::string_view password,
+	                                                        Account& account);
+	static GameworldAuthenticationResult gameworldAuthentication(std::string_view accountName,
+	                                                              std::string_view password,
+	                                                              std::string_view characterName);
+	static uint32_t getAccountIdByPlayerName(std::string_view playerName);
+	static uint32_t getAccountIdByPlayerId(uint32_t playerId);
+
+	static AccountType_t getAccountType(uint32_t accountId);
+	static void setAccountType(uint32_t accountId, AccountType_t accountType);
+	static void updateOnlineStatus(uint32_t guid, bool login, bool broadcasting, const std::string& cast_password, const std::string& cast_description, uint32_t spectators);
+	static void removeOnlineStatus(uint32_t guid);
+	static bool preloadPlayer(Player* player);
+
+	static bool loadPlayerById(Player* player, uint32_t id, bool deferWorldData = false);
+	static bool loadPlayerByName(Player* player, std::string_view name);
+	static bool loadPlayer(Player* player, DBResult_ptr result, bool deferWorldData = false);
+	static void loadPlayerWorldData(Player* player);
+	struct PlayerSaveSnapshot
+	{
+		std::vector<std::string> queries;
+		uint64_t storageSnapshotId = 0;
+		std::unordered_set<uint32_t> snapshotModifiedKeys;
+		std::unordered_set<uint32_t> snapshotRemovedKeys;
+		uint64_t bestiarySnapshotId = 0;
+		std::unordered_set<uint16_t> snapshotModifiedBestiaryRaceIds;
+		// Executed in the same commit as the snapshot; matches this WAL generation.
+		std::string walClearQuery;
+	};
+	enum class FlushResult { Failed, Committed, Indeterminate };
+	static FlushResult flushPlayerSaveChecked(const PlayerSaveSnapshot& snapshot);
+	static std::optional<PlayerSaveSnapshot> buildPlayerSave(Player* player);
+	static bool flushPlayerSave(const PlayerSaveSnapshot& snapshot);
+	static bool addRewardItems(uint32_t playerId, const ItemBlockList& itemList, DBInsert& query_insert, PropWriteStream& propWriteStream);
+	// Gathers every inbox item of every town locker, keyed by depot id. Exposed so the
+	// persistence tests can assert on it without a database round trip.
+	static void collectInboxItems(const Player* player, ItemBlockList& itemList);
+	// Serializes an item list, expanding nested containers, into query_insert. Public alongside
+	// addRewardItems, which does the same job for the reward chest, so the persistence tests can
+	// drive a real save.
+	static bool saveItems(const Player* player, const ItemBlockList& itemList, DBInsert& query_insert,
+	                      PropWriteStream& propWriteStream);
+	static uint32_t getGuidByName(std::string_view name);
+	static bool getGuidByNameEx(uint32_t& guid, bool& specialVip, std::string& name);
+	static bool saveAutoLootConfig(Player* player);
+	static bool savePlayerDailyRewardStorages(Player* player);
+	static bool loadAutoLootConfig(Player* player);
+	static std::string_view getNameByGuid(uint32_t guid);
+	static bool formatPlayerName(std::string& name);
+	static void increaseBankBalance(uint32_t guid, uint64_t bankBalance);
+	static bool hasBiddedOnHouse(uint32_t guid_guild);
+
+	static std::forward_list<VIPEntry> getVIPEntries(uint32_t accountId);
+	static void addVIPEntry(uint32_t accountId, uint32_t guid);
+	static void removeVIPEntry(uint32_t accountId, uint32_t guid);
+
+	static bool updatePremiumTime(uint32_t accountId, time_t endTime);
+
+	static uint64_t getTibiaCoins(uint32_t accountId);
+	static void updateTibiaCoins(uint32_t accountId, uint64_t tibiaCoins);
+
+	static bool createAccount(const std::string& name, const std::string& password, uint32_t& accountId);
+	static bool setAccountEmail(uint32_t accountId, const std::string& email);
+	static bool accountEmailExists(std::string_view email);
+	static bool setPassword(uint32_t accountId, const std::string& newPassword);
+	static bool setRecoveryKey(uint32_t accountId, const std::string& recoveryKey);
+	static bool createPlayer(uint32_t accountId, const std::string& name, uint16_t vocationId, PlayerSex_t sex);
+	static bool deletePlayer(uint32_t playerId);
+	static std::vector<std::string> getPlayersByAccountId(uint32_t accountId);
+	static bool playerNameExists(const std::string& name);
+	static bool accountNameExists(const std::string& name);
+	// Resolves a login identifier (account name or email) to the stored account name.
+	static std::optional<std::string> resolveAccountNameByIdentifier(std::string_view identifier);
+
+	static GuildWarVector getWarList(uint32_t guildId);
+	static std::vector<std::pair<std::string, std::string>> getCastList(const std::string& password);
+
+private:
+	friend class SaveManager;
+
+	using ItemMap = std::map<uint32_t, std::pair<std::shared_ptr<Item>, uint32_t>>;
+
+	static void loadItems(ItemMap& itemMap, DBResult_ptr result);
+	static void cleanupItemMap(ItemMap& itemMap);
+	static void loadPlayerGuild(Player* player);
+	static bool savePlayer(Player* player);
+	static bool savePlayerQueries(Player* player, const Player::BestiaryDirtySnapshot& bestiarySnapshot);
+};
+
+#endif

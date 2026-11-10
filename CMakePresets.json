@@ -1,0 +1,290 @@
+{
+	"version": 3,
+	"configurePresets": [
+		{
+			"name": "default",
+			"description": "Generate Ninja project files",
+			"binaryDir": "${sourceDir}/build"
+		},
+		{
+			"name": "vcpkg",
+			"inherits": [
+				"default"
+			],
+			"description": "Configure with vcpkg toolchain and generate Ninja project files",
+			"toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+		},
+		{
+			"name": "asan-linux",
+			"inherits": [
+				"default"
+			],
+			"description": "Configure AddressSanitizer with system packages for Linux/WSL",
+			"binaryDir": "${sourceDir}/build-asan-linux",
+			"cacheVariables": {
+				"BUILD_TESTING": "OFF",
+				"CMAKE_BUILD_TYPE": "Debug",
+				"CMAKE_PREFIX_PATH": "/usr/local;$env{HOME}/.local",
+				"ENABLE_ASAN": "ON",
+				"LUA_INCLUDE_DIR": "/usr/local/include",
+				"LUA_LIBRARY": "/usr/local/lib/liblua.a",
+				"LUA_LIBRARIES": "/usr/local/lib/liblua.a;m;dl",
+				"LUA_VERSION_STRING": "5.5.0",
+				"USE_MIMALLOC": "OFF"
+			}
+		},
+		{
+			"name": "asan-linux-tests",
+			"inherits": [
+				"asan-linux"
+			],
+			"description": "Configure AddressSanitizer with unit tests for Linux/WSL lifetime PRs",
+			"binaryDir": "${sourceDir}/build-asan-linux-tests",
+			"cacheVariables": {
+				"BUILD_TESTING": "ON"
+			}
+		},
+		{
+			"name": "valgrind-linux",
+			"inherits": [
+				"default"
+			],
+			"description": "Configure a Valgrind-friendly Linux/WSL build without mimalloc",
+			"binaryDir": "${sourceDir}/build-valgrind-linux",
+			"cacheVariables": {
+				"BUILD_TESTING": "OFF",
+				"CMAKE_BUILD_TYPE": "RelWithDebInfo",
+				"USE_MIMALLOC": "OFF"
+			}
+		},
+		{
+			"name": "release-portable-linux",
+			"inherits": [
+				"default"
+			],
+			"description": "Configure a portable Linux Release build without -march=native",
+			"binaryDir": "${sourceDir}/build-release-portable-linux",
+			"cacheVariables": {
+				"BUILD_TESTING": "OFF",
+				"CMAKE_BUILD_TYPE": "Release",
+				"ENABLE_NATIVE_OPTIMIZATIONS": "OFF",
+				"USE_MIMALLOC": "ON"
+			}
+		},
+		{
+			"name": "asan-vcpkg",
+			"inherits": [
+				"vcpkg"
+			],
+			"description": "Configure with vcpkg and AddressSanitizer enabled",
+			"binaryDir": "${sourceDir}/build-asan",
+			"cacheVariables": {
+				"BUILD_TESTING": "ON",
+				"CMAKE_BUILD_TYPE": "Debug",
+				"ENABLE_ASAN": "ON"
+			}
+		},
+		{
+			"name": "vcpkg-benchmarks",
+			"inherits": [
+				"vcpkg"
+			],
+			"description": "Configure with vcpkg and benchmarks enabled",
+			"binaryDir": "${sourceDir}/build-bench",
+			"cacheVariables": {
+				"BUILD_BENCHMARKING": "ON",
+				"BUILD_TESTING": "OFF",
+				"CMAKE_BUILD_TYPE": "Release"
+			}
+		},
+		{
+			"name": "release-tests",
+			"inherits": [
+				"default"
+			],
+			"description": "Release tests with fast linking; production server retains LTO",
+			"binaryDir": "${sourceDir}/build-release-tests",
+			"cacheVariables": {
+				"BUILD_TESTING": "ON",
+				"CMAKE_BUILD_TYPE": "Release",
+				"ENABLE_TEST_LTO": "OFF"
+			}
+		},
+		{
+			"name": "release-tests-lto",
+			"inherits": [
+				"release-tests"
+			],
+			"description": "Release tests linked with the production LTO library",
+			"binaryDir": "${sourceDir}/build-release-tests-lto",
+			"cacheVariables": {
+				"ENABLE_TEST_LTO": "ON"
+			}
+		},
+		{
+			"name": "release-tests-vcpkg",
+			"inherits": [
+				"release-tests",
+				"vcpkg"
+			],
+			"description": "Fast Release tests using vcpkg dependencies",
+			"binaryDir": "${sourceDir}/build-release-tests-vcpkg",
+			"cacheVariables": {}
+		},
+		{
+			"name": "release-tests-vcpkg-lto",
+			"inherits": [
+				"release-tests-vcpkg"
+			],
+			"description": "Release tests with vcpkg and the production LTO library",
+			"binaryDir": "${sourceDir}/build-release-tests-vcpkg-lto",
+			"cacheVariables": {
+				"ENABLE_TEST_LTO": "ON"
+			}
+		}
+	],
+	"buildPresets": [
+		{
+			"name": "default",
+			"configurePreset": "default"
+		},
+		{
+			"name": "vcpkg",
+			"configurePreset": "vcpkg"
+		},
+		{
+			"name": "asan-linux",
+			"configurePreset": "asan-linux",
+			"configuration": "Debug"
+		},
+		{
+			"name": "asan-linux-tests",
+			"configurePreset": "asan-linux-tests",
+			"configuration": "Debug"
+		},
+		{
+			"name": "valgrind-linux",
+			"configurePreset": "valgrind-linux",
+			"configuration": "RelWithDebInfo"
+		},
+		{
+			"name": "release-portable-linux",
+			"configurePreset": "release-portable-linux",
+			"configuration": "Release"
+		},
+		{
+			"name": "asan-vcpkg",
+			"configurePreset": "asan-vcpkg",
+			"configuration": "Debug"
+		},
+		{
+			"name": "vcpkg-benchmarks",
+			"configurePreset": "vcpkg-benchmarks",
+			"configuration": "Release"
+		},
+		{
+			"name": "release-tests",
+			"configurePreset": "release-tests",
+			"configuration": "Release"
+		},
+		{
+			"name": "release-tests-lto",
+			"configurePreset": "release-tests-lto",
+			"configuration": "Release"
+		},
+		{
+			"name": "release-tests-vcpkg",
+			"configurePreset": "release-tests-vcpkg",
+			"configuration": "Release"
+		},
+		{
+			"name": "release-tests-vcpkg-lto",
+			"configurePreset": "release-tests-vcpkg-lto",
+			"configuration": "Release"
+		}
+	],
+	"testPresets": [
+		{
+			"name": "default",
+			"configurePreset": "default"
+		},
+		{
+			"name": "vcpkg",
+			"configurePreset": "vcpkg"
+		},
+		{
+			"name": "asan-linux",
+			"configurePreset": "asan-linux",
+			"configuration": "Debug"
+		},
+		{
+			"name": "asan-linux-tests",
+			"configurePreset": "asan-linux-tests",
+			"configuration": "Debug"
+		},
+		{
+			"name": "valgrind-linux",
+			"configurePreset": "valgrind-linux",
+			"configuration": "RelWithDebInfo"
+		},
+		{
+			"name": "release-portable-linux",
+			"configurePreset": "release-portable-linux",
+			"configuration": "Release"
+		},
+		{
+			"name": "asan-vcpkg",
+			"configurePreset": "asan-vcpkg",
+			"configuration": "Debug"
+		},
+		{
+			"name": "vcpkg-benchmarks",
+			"configurePreset": "vcpkg-benchmarks",
+			"configuration": "Release"
+		},
+		{
+			"name": "release-tests",
+			"configurePreset": "release-tests",
+			"configuration": "Release",
+			"output": {
+				"outputOnFailure": true
+			},
+			"execution": {
+				"noTestsAction": "error"
+			}
+		},
+		{
+			"name": "release-tests-lto",
+			"configurePreset": "release-tests-lto",
+			"configuration": "Release",
+			"output": {
+				"outputOnFailure": true
+			},
+			"execution": {
+				"noTestsAction": "error"
+			}
+		},
+		{
+			"name": "release-tests-vcpkg",
+			"configurePreset": "release-tests-vcpkg",
+			"configuration": "Release",
+			"output": {
+				"outputOnFailure": true
+			},
+			"execution": {
+				"noTestsAction": "error"
+			}
+		},
+		{
+			"name": "release-tests-vcpkg-lto",
+			"configurePreset": "release-tests-vcpkg-lto",
+			"configuration": "Release",
+			"output": {
+				"outputOnFailure": true
+			},
+			"execution": {
+				"noTestsAction": "error"
+			}
+		}
+	]
+}

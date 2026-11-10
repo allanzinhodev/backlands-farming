@@ -1,0 +1,1072 @@
+// Copyright 2023 The Forgotten Server Authors. All rights reserved.
+// Use of this source code is governed by the GPL-2.0 License that can be found in the LICENSE file.
+
+#ifndef FS_ITEM_H
+#define FS_ITEM_H
+
+#include "configmanager.h"
+#include "cylinder.h"
+#include "items.h"
+#include "luascript.h"
+#include "observer_ptr.h"
+#include "thing.h"
+#include "tools.h"
+#include "imbuement.h"
+
+class BedItem;
+class Container;
+class Door;
+class MagicField;
+class Mailbox;
+class Player;
+class Teleport;
+class TrashHolder;
+
+enum ITEMPROPERTY
+{
+	CONST_PROP_BLOCKSOLID = 0,
+	CONST_PROP_HASHEIGHT,
+	CONST_PROP_BLOCKPROJECTILE,
+	CONST_PROP_BLOCKPATH,
+	CONST_PROP_ISVERTICAL,
+	CONST_PROP_ISHORIZONTAL,
+	CONST_PROP_MOVEABLE,
+	CONST_PROP_IMMOVABLEBLOCKSOLID,
+	CONST_PROP_IMMOVABLEBLOCKPATH,
+	CONST_PROP_IMMOVABLENOFIELDBLOCKPATH,
+	CONST_PROP_NOFIELDBLOCKPATH,
+	CONST_PROP_SUPPORTHANGABLE,
+};
+
+enum TradeEvents_t
+{
+	ON_TRADE_TRANSFER,
+	ON_TRADE_CANCEL,
+};
+
+enum ItemDecayState_t : uint8_t
+{
+	DECAYING_FALSE = 0,
+	DECAYING_TRUE,
+	DECAYING_PENDING,
+	DECAYING_STOPPING,
+};
+
+enum AttrTypes_t
+{
+	// ATTR_DESCRIPTION = 1,
+	// ATTR_EXT_FILE = 2,
+	ATTR_TILE_FLAGS = 3,
+	ATTR_ACTION_ID = 4,
+	ATTR_UNIQUE_ID = 5,
+	ATTR_TEXT = 6,
+	ATTR_DESC = 7,
+	ATTR_TELE_DEST = 8,
+	ATTR_ITEM = 9,
+	ATTR_DEPOT_ID = 10,
+	// ATTR_EXT_SPAWN_FILE = 11,
+	ATTR_RUNE_CHARGES = 12,
+	// ATTR_EXT_HOUSE_FILE = 13,
+	ATTR_HOUSEDOORID = 14,
+	ATTR_COUNT = 15,
+	ATTR_DURATION = 16,
+	ATTR_DECAYING_STATE = 17,
+	ATTR_WRITTENDATE = 18,
+	ATTR_WRITTENBY = 19,
+	ATTR_SLEEPERGUID = 20,
+	ATTR_SLEEPSTART = 21,
+	ATTR_CHARGES = 22,
+	ATTR_CONTAINER_ITEMS = 23,
+	ATTR_NAME = 24,
+	ATTR_ARTICLE = 25,
+	ATTR_PLURALNAME = 26,
+	ATTR_WEIGHT = 27,
+	ATTR_ATTACK = 28,
+	ATTR_DEFENSE = 29,
+	ATTR_EXTRADEFENSE = 30,
+	ATTR_ARMOR = 31,
+	ATTR_HITCHANCE = 32,
+	ATTR_SHOOTRANGE = 33,
+	ATTR_CUSTOM_ATTRIBUTES = 34,
+	ATTR_SPECIAL = 35,
+	ATTR_WRAPID = 36,
+	ATTR_STOREITEM = 37,
+	ATTR_ATTACK_SPEED = 38,
+	ATTR_CLASSIFICATION = 39,
+	ATTR_TIER = 40,
+	ATTR_REWARDID = 41,
+	ATTR_REFLECT = 42,
+	ATTR_BOOST = 43,
+	ATTR_IMBUESLOTS = 44,
+	ATTR_IMBUEMENTS = 45
+};
+
+enum Attr_ReadValue
+{
+	ATTR_READ_CONTINUE,
+	ATTR_READ_ERROR,
+	ATTR_READ_END,
+};
+
+class ItemAttributes
+{
+public:
+	ItemAttributes() = default;
+
+	void setSpecialDescription(std::string_view desc) { setStrAttr(ITEM_ATTRIBUTE_DESCRIPTION, desc); }
+	std::string_view getSpecialDescription() const { return getStrAttr(ITEM_ATTRIBUTE_DESCRIPTION); }
+
+	void setText(std::string_view text) { setStrAttr(ITEM_ATTRIBUTE_TEXT, text); }
+	void resetText() { removeAttribute(ITEM_ATTRIBUTE_TEXT); }
+	std::string_view getText() const { return getStrAttr(ITEM_ATTRIBUTE_TEXT); }
+
+	void setDate(int32_t n) { setIntAttr(ITEM_ATTRIBUTE_DATE, n); }
+	void resetDate() { removeAttribute(ITEM_ATTRIBUTE_DATE); }
+	time_t getDate() const { return static_cast<time_t>(getIntAttr(ITEM_ATTRIBUTE_DATE)); }
+
+	void setWriter(std::string_view writer) { setStrAttr(ITEM_ATTRIBUTE_WRITER, writer); }
+	void resetWriter() { removeAttribute(ITEM_ATTRIBUTE_WRITER); }
+	std::string_view getWriter() const { return getStrAttr(ITEM_ATTRIBUTE_WRITER); }
+
+	void setActionId(uint16_t n) { setIntAttr(ITEM_ATTRIBUTE_ACTIONID, n); }
+	uint16_t getActionId() const { return static_cast<uint16_t>(getIntAttr(ITEM_ATTRIBUTE_ACTIONID)); }
+
+	void setUniqueId(uint16_t n) { setIntAttr(ITEM_ATTRIBUTE_UNIQUEID, n); }
+	uint16_t getUniqueId() const { return static_cast<uint16_t>(getIntAttr(ITEM_ATTRIBUTE_UNIQUEID)); }
+
+	void setCharges(uint16_t n) { setIntAttr(ITEM_ATTRIBUTE_CHARGES, n); }
+	uint16_t getCharges() const { return static_cast<uint16_t>(getIntAttr(ITEM_ATTRIBUTE_CHARGES)); }
+
+	void setFluidType(uint16_t n) { setIntAttr(ITEM_ATTRIBUTE_FLUIDTYPE, n); }
+	uint16_t getFluidType() const { return static_cast<uint16_t>(getIntAttr(ITEM_ATTRIBUTE_FLUIDTYPE)); }
+
+	void setOwner(uint32_t owner) { setIntAttr(ITEM_ATTRIBUTE_OWNER, owner); }
+	uint32_t getOwner() const { return getIntAttr(ITEM_ATTRIBUTE_OWNER); }
+
+	void setCorpseOwner(uint32_t corpseOwner) { setIntAttr(ITEM_ATTRIBUTE_CORPSEOWNER, corpseOwner); }
+	uint32_t getCorpseOwner() const { return getIntAttr(ITEM_ATTRIBUTE_CORPSEOWNER); }
+
+	void setDuration(int32_t time) { setIntAttr(ITEM_ATTRIBUTE_DURATION, std::max<int32_t>(0, time)); }
+	void setDurationTimestamp(int64_t timestamp) { setIntAttr(ITEM_ATTRIBUTE_DURATION_TIMESTAMP, timestamp); }
+	int32_t getDuration() const {
+		ItemDecayState_t decayState = getDecaying();
+		if (decayState == DECAYING_TRUE || decayState == DECAYING_STOPPING) {
+			return std::max<int32_t>(0, static_cast<int32_t>(getIntAttr(ITEM_ATTRIBUTE_DURATION_TIMESTAMP) - OTSYS_TIME()));
+		} else {
+			return getIntAttr(ITEM_ATTRIBUTE_DURATION);
+		}
+	}
+
+	void setDecaying(ItemDecayState_t decayState) { 
+		setIntAttr(ITEM_ATTRIBUTE_DECAYSTATE, decayState); 
+		if (decayState == DECAYING_FALSE) {
+			removeAttribute(ITEM_ATTRIBUTE_DURATION_TIMESTAMP);
+		}
+	}
+	ItemDecayState_t getDecaying() const
+	{
+		return static_cast<ItemDecayState_t>(getIntAttr(ITEM_ATTRIBUTE_DECAYSTATE));
+	}
+
+	struct CustomAttribute
+	{
+		using VariantAttribute = std::variant<std::monostate, std::string, int64_t, double, bool>;
+		VariantAttribute value;
+
+		CustomAttribute() : value(std::monostate{}) {}
+
+		template <typename T>
+		explicit CustomAttribute(const T& v) : value(v)
+		{}
+
+		template <typename T>
+		void set(const T& v)
+		{
+			value = v;
+		}
+
+		template <typename T>
+		const T& get();
+
+		struct PushLuaVisitor
+		{
+			ObserverPtr<lua_State> L;
+
+			explicit PushLuaVisitor(lua_State* L) : L(L) {}
+
+			void operator()(const std::monostate&) const { lua_pushnil(L); }
+
+			void operator()(std::string_view v) const { Lua::pushString(L, v); }
+
+			void operator()(bool v) const { Lua::pushBoolean(L, v); }
+
+			void operator()(const int64_t& v) const { lua_pushinteger(L, v); }
+
+			void operator()(const double& v) const { lua_pushnumber(L, v); }
+		};
+
+		void pushToLua(lua_State* L) const { std::visit(PushLuaVisitor(L), value); }
+
+		struct SerializeVisitor
+		{
+			PropWriteStream& propWriteStream;
+
+			explicit SerializeVisitor(PropWriteStream& propWriteStream) : propWriteStream(propWriteStream) {}
+
+			void operator()(const std::monostate&) const {}
+
+			void operator()(const std::string& v) const { propWriteStream.writeString(v); }
+
+			void operator()(const int64_t& v) const { propWriteStream.write<int64_t>(v); }
+
+			void operator()(const double& v) const { propWriteStream.write<double>(v); }
+
+			void operator()(const bool& v) const { propWriteStream.write<bool>(v); }
+		};
+
+		void serialize(PropWriteStream& propWriteStream) const
+		{
+			propWriteStream.write<uint8_t>(static_cast<uint8_t>(value.index()));
+			std::visit(SerializeVisitor(propWriteStream), value);
+		}
+
+		bool unserialize(PropStream& propStream)
+		{
+			// This is hard-coded so it's not general, depends on the position of the variants.
+			uint8_t pos;
+			if (!propStream.read<uint8_t>(pos)) {
+				return false;
+			}
+
+			switch (pos) {
+				case 0: { // std::monostate
+					value = std::monostate{};
+					break;
+				}
+
+				case 1: { // std::string
+					auto [str, ok] = propStream.readString();
+					if (!ok) {
+						return false;
+					}
+					value = std::string{str};
+					break;
+				}
+
+				case 2: { // int64_t
+					int64_t tmp;
+					if (!propStream.read<int64_t>(tmp)) {
+						return false;
+					}
+					value = VariantAttribute(tmp);
+					break;
+				}
+
+				case 3: { // double
+					double tmp;
+					if (!propStream.read<double>(tmp)) {
+						return false;
+					}
+					value = VariantAttribute(tmp);
+					break;
+				}
+
+				case 4: { // bool
+					bool tmp;
+					if (!propStream.read<bool>(tmp)) {
+						return false;
+					}
+					value = VariantAttribute(tmp);
+					break;
+				}
+
+				default: {
+					value = std::monostate{};
+					return false;
+				}
+			}
+			return true;
+		}
+	};
+
+private:
+	bool hasAttribute(itemAttrTypes type) const { return (type & attributeBits) != 0; }
+	void removeAttribute(itemAttrTypes type);
+
+	static std::string emptyString;
+	static int64_t emptyInt;
+	static double emptyDouble;
+	static bool emptyBool;
+	static Reflect emptyReflect;
+
+	using CustomAttributeMap = std::unordered_map<std::string, CustomAttribute>;
+
+	struct Attribute
+	{
+		using Value = std::variant<std::monostate, int64_t, std::string, CustomAttributeMap>;
+
+		Value value;
+		itemAttrTypes type;
+
+		explicit Attribute(itemAttrTypes type) : type(type) {}
+		Attribute(const Attribute&) = default;
+		Attribute(Attribute&&) = default;
+		Attribute& operator=(const Attribute&) = default;
+		Attribute& operator=(Attribute&&) = default;
+		~Attribute() = default;
+	};
+
+	std::vector<Attribute> attributes;
+	uint64_t attributeBits = 0;
+
+	std::map<CombatType_t, Reflect> reflect;
+	std::map<CombatType_t, uint16_t> boostPercent;
+
+	const Reflect& getReflect(CombatType_t combatType)
+	{
+		auto it = reflect.find(combatType);
+		return it != reflect.end() ? it->second : emptyReflect;
+	}
+	int16_t getBoostPercent(CombatType_t combatType)
+	{
+		auto it = boostPercent.find(combatType);
+		return it != boostPercent.end() ? it->second : 0;
+	}
+
+	std::string_view getStrAttr(itemAttrTypes type) const;
+	void setStrAttr(itemAttrTypes type, std::string_view value);
+
+	int64_t getIntAttr(itemAttrTypes type) const;
+	void setIntAttr(itemAttrTypes type, int64_t value);
+	void increaseIntAttr(itemAttrTypes type, int64_t value);
+
+	const Attribute* getExistingAttr(itemAttrTypes type) const;
+	Attribute& getAttr(itemAttrTypes type);
+
+	CustomAttributeMap* getCustomAttributeMap()
+	{
+		if (!hasAttribute(ITEM_ATTRIBUTE_CUSTOM)) {
+			return nullptr;
+		}
+
+		return std::get_if<CustomAttributeMap>(&getAttr(ITEM_ATTRIBUTE_CUSTOM).value);
+	}
+
+	const CustomAttributeMap* getCustomAttributeMap() const
+	{
+		if (!hasAttribute(ITEM_ATTRIBUTE_CUSTOM)) {
+			return nullptr;
+		}
+
+		const Attribute* attr = getExistingAttr(ITEM_ATTRIBUTE_CUSTOM);
+		if (!attr) {
+			return nullptr;
+		}
+
+		return std::get_if<CustomAttributeMap>(&attr->value);
+	}
+
+	template <typename R>
+	void setCustomAttribute(int64_t key, R value)
+	{
+		auto tmp = std::to_string(key);
+		setCustomAttribute(tmp, value);
+	}
+
+	void setCustomAttribute(int64_t key, CustomAttribute& value)
+	{
+		auto tmp = std::to_string(key);
+		setCustomAttribute(tmp, value);
+	}
+
+	template <typename R>
+	void setCustomAttribute(std::string_view key, R value)
+	{
+		if (hasAttribute(ITEM_ATTRIBUTE_CUSTOM)) {
+			removeCustomAttribute(key);
+		}
+		auto& attr = getAttr(ITEM_ATTRIBUTE_CUSTOM);
+		if (!std::holds_alternative<CustomAttributeMap>(attr.value)) {
+			attr.value.emplace<CustomAttributeMap>();
+		}
+		auto lowercaseKey = asLowerCaseString(std::string{key});
+		std::get<CustomAttributeMap>(attr.value).emplace(lowercaseKey, value);
+	}
+
+	void setCustomAttribute(std::string_view key, const CustomAttribute& value)
+	{
+		if (hasAttribute(ITEM_ATTRIBUTE_CUSTOM)) {
+			removeCustomAttribute(key);
+		}
+		auto& attr = getAttr(ITEM_ATTRIBUTE_CUSTOM);
+		if (!std::holds_alternative<CustomAttributeMap>(attr.value)) {
+			attr.value.emplace<CustomAttributeMap>();
+		}
+		auto lowercaseKey = asLowerCaseString(std::string{key});
+		std::get<CustomAttributeMap>(attr.value).emplace(lowercaseKey, value);
+	}
+
+	const CustomAttribute* getCustomAttribute(int64_t key) const
+	{
+		auto tmp = std::to_string(key);
+		return getCustomAttribute(tmp);
+	}
+
+	const CustomAttribute* getCustomAttribute(const std::string& key) const
+	{
+		if (const CustomAttributeMap* customAttrMap = getCustomAttributeMap()) {
+			auto it = customAttrMap->find(asLowerCaseString(key));
+			if (it != customAttrMap->end()) {
+				return &(it->second);
+			}
+		}
+		return nullptr;
+	}
+
+	bool removeCustomAttribute(int64_t key)
+	{
+		auto tmp = std::to_string(key);
+		return removeCustomAttribute(tmp);
+	}
+
+	bool removeCustomAttribute(std::string_view key)
+	{
+		if (CustomAttributeMap* customAttrMap = getCustomAttributeMap()) {
+			auto lowercaseKey = asLowerCaseString(std::string{key});
+			if (auto it = customAttrMap->find(lowercaseKey); it != customAttrMap->end()) {
+				customAttrMap->erase(it);
+				if (customAttrMap->empty()) {
+					removeAttribute(ITEM_ATTRIBUTE_CUSTOM);
+				}
+				return true;
+			}
+		}
+		return false;
+	}
+
+	const static uint64_t intAttributeTypes =
+	    ITEM_ATTRIBUTE_ACTIONID | ITEM_ATTRIBUTE_UNIQUEID | ITEM_ATTRIBUTE_DATE | ITEM_ATTRIBUTE_WEIGHT |
+	    ITEM_ATTRIBUTE_ATTACK | ITEM_ATTRIBUTE_DEFENSE | ITEM_ATTRIBUTE_EXTRADEFENSE | ITEM_ATTRIBUTE_ARMOR |
+	    ITEM_ATTRIBUTE_HITCHANCE | ITEM_ATTRIBUTE_SHOOTRANGE | ITEM_ATTRIBUTE_OWNER | ITEM_ATTRIBUTE_DURATION |
+	    ITEM_ATTRIBUTE_DECAYSTATE | ITEM_ATTRIBUTE_CORPSEOWNER | ITEM_ATTRIBUTE_CHARGES | ITEM_ATTRIBUTE_FLUIDTYPE |
+	    ITEM_ATTRIBUTE_DOORID | ITEM_ATTRIBUTE_DURATION_TIMESTAMP | ITEM_ATTRIBUTE_WRAPID | ITEM_ATTRIBUTE_STOREITEM |
+	    ITEM_ATTRIBUTE_ATTACK_SPEED | ITEM_ATTRIBUTE_CLASSIFICATION | ITEM_ATTRIBUTE_TIER | ITEM_ATTRIBUTE_REDUCESKILLLOSS |
+	    ITEM_ATTRIBUTE_DROPBONUS;
+	const static uint32_t stringAttributeTypes = ITEM_ATTRIBUTE_DESCRIPTION | ITEM_ATTRIBUTE_TEXT |
+	                                             ITEM_ATTRIBUTE_WRITER | ITEM_ATTRIBUTE_NAME | ITEM_ATTRIBUTE_ARTICLE |
+	                                             ITEM_ATTRIBUTE_PLURALNAME;
+
+public:
+	static bool isIntAttrType(itemAttrTypes type) { return (type & intAttributeTypes) == type; }
+	static bool isStrAttrType(itemAttrTypes type) { return (type & stringAttributeTypes) == type; }
+	inline static bool isCustomAttrType(itemAttrTypes type) { return (type & ITEM_ATTRIBUTE_CUSTOM) == type; }
+
+	const std::vector<Attribute>& getList() const { return attributes; }
+
+	friend class Item;
+};
+
+class Item : virtual public Thing, public std::enable_shared_from_this<Item>
+{
+public:
+	// Factory member to create item of right type based on type
+	[[nodiscard]] static std::shared_ptr<Item> CreateItem(const uint16_t type, uint16_t count = 0);
+	static void clearGlobalRegistry();
+	[[nodiscard]] static std::shared_ptr<Container> CreateItemAsContainer(const uint16_t type, uint16_t size);
+	[[nodiscard]] static std::shared_ptr<Item> CreateItem(PropStream& propStream);
+	static Items items;
+
+	// Constructor for items
+	Item(const uint16_t type, uint16_t count = 0);
+	Item(const Item& i);
+	[[nodiscard]] virtual std::shared_ptr<Item> clone() const;
+
+	virtual ~Item();
+
+	// non-assignable
+	Item& operator=(const Item&) = delete;
+
+	bool equals(const Item* otherItem) const;
+	bool equalsIgnoringInstance(const Item* otherItem) const;
+
+	Item* getItem() override final { return this; }
+	const Item* getItem() const override final { return this; }
+	virtual Container* getContainer() { return nullptr; }
+	virtual const Container* getContainer() const { return nullptr; }
+	virtual Teleport* getTeleport() { return nullptr; }
+	virtual const Teleport* getTeleport() const { return nullptr; }
+	virtual TrashHolder* getTrashHolder() { return nullptr; }
+	virtual const TrashHolder* getTrashHolder() const { return nullptr; }
+	virtual Mailbox* getMailbox() { return nullptr; }
+	virtual const Mailbox* getMailbox() const { return nullptr; }
+	virtual std::shared_ptr<Door> getDoor() { return nullptr; }
+	virtual std::shared_ptr<const Door> getDoor() const { return nullptr; }
+	virtual MagicField* getMagicField() { return nullptr; }
+	virtual const MagicField* getMagicField() const { return nullptr; }
+	virtual std::shared_ptr<BedItem> getBed() { return nullptr; }
+	virtual std::shared_ptr<const BedItem> getBed() const { return nullptr; }
+
+	std::string_view getStrAttr(itemAttrTypes type) const
+	{
+		if (!attributes) {
+			return ItemAttributes::emptyString;
+		}
+		return attributes->getStrAttr(type);
+	}
+	void setStrAttr(itemAttrTypes type, std::string_view value) { getAttributes()->setStrAttr(type, value); }
+
+	int64_t getIntAttr(itemAttrTypes type) const
+	{
+		if (!attributes) {
+			return 0;
+		}
+		return attributes->getIntAttr(type);
+	}
+	void setIntAttr(itemAttrTypes type, int64_t value) { getAttributes()->setIntAttr(type, value); }
+	void increaseIntAttr(itemAttrTypes type, int64_t value) { getAttributes()->increaseIntAttr(type, value); }
+
+	void removeAttribute(itemAttrTypes type)
+	{
+		if (attributes) {
+			attributes->removeAttribute(type);
+		}
+	}
+	bool hasAttribute(itemAttrTypes type) const
+	{
+		if (!attributes) {
+			return false;
+		}
+		return attributes->hasAttribute(type);
+	}
+
+	template <typename R>
+	void setCustomAttribute(std::string_view key, R value)
+	{
+		getAttributes()->setCustomAttribute(key, value);
+	}
+
+	void setCustomAttribute(std::string_view key, ItemAttributes::CustomAttribute& value)
+	{
+		getAttributes()->setCustomAttribute(key, value);
+	}
+
+	const ItemAttributes::CustomAttribute* getCustomAttribute(int64_t key) const
+	{
+		if (!attributes) {
+			return nullptr;
+		}
+		return attributes->getCustomAttribute(key);
+	}
+
+	const ItemAttributes::CustomAttribute* getCustomAttribute(const std::string& key) const
+	{
+		if (!attributes) {
+			return nullptr;
+		}
+		return attributes->getCustomAttribute(key);
+	}
+
+	bool removeCustomAttribute(int64_t key)
+	{
+		if (!attributes) {
+			return false;
+		}
+		return getAttributes()->removeCustomAttribute(key);
+	}
+
+	bool removeCustomAttribute(std::string_view key)
+	{
+		if (!attributes) {
+			return false;
+		}
+		return getAttributes()->removeCustomAttribute(key);
+	}
+
+	void setSpecialDescription(std::string_view desc) { setStrAttr(ITEM_ATTRIBUTE_DESCRIPTION, desc); }
+	std::string_view getSpecialDescription() const { return getStrAttr(ITEM_ATTRIBUTE_DESCRIPTION); }
+
+	void setText(std::string_view text) { setStrAttr(ITEM_ATTRIBUTE_TEXT, text); }
+	void resetText() { removeAttribute(ITEM_ATTRIBUTE_TEXT); }
+	std::string_view getText() const { return getStrAttr(ITEM_ATTRIBUTE_TEXT); }
+
+	void setDate(int32_t n) { setIntAttr(ITEM_ATTRIBUTE_DATE, n); }
+	void resetDate() { removeAttribute(ITEM_ATTRIBUTE_DATE); }
+	time_t getDate() const { return static_cast<time_t>(getIntAttr(ITEM_ATTRIBUTE_DATE)); }
+
+	void setWriter(std::string_view writer) { setStrAttr(ITEM_ATTRIBUTE_WRITER, writer); }
+	void resetWriter() { removeAttribute(ITEM_ATTRIBUTE_WRITER); }
+	std::string_view getWriter() const { return getStrAttr(ITEM_ATTRIBUTE_WRITER); }
+
+	void setActionId(uint16_t n)
+	{
+		if (n < 100) {
+			n = 100;
+		}
+
+		setIntAttr(ITEM_ATTRIBUTE_ACTIONID, n);
+	}
+	uint16_t getActionId() const
+	{
+		if (!attributes) {
+			return 0;
+		}
+		return static_cast<uint16_t>(getIntAttr(ITEM_ATTRIBUTE_ACTIONID));
+	}
+
+	uint16_t getUniqueId() const
+	{
+		if (!attributes) {
+			return 0;
+		}
+		return static_cast<uint16_t>(getIntAttr(ITEM_ATTRIBUTE_UNIQUEID));
+	}
+
+	void setCharges(uint16_t n) { setIntAttr(ITEM_ATTRIBUTE_CHARGES, n); }
+	uint16_t getCharges() const
+	{
+		if (!attributes) {
+			return 0;
+		}
+		return static_cast<uint16_t>(getIntAttr(ITEM_ATTRIBUTE_CHARGES));
+	}
+
+	void setFluidType(uint16_t n) { setIntAttr(ITEM_ATTRIBUTE_FLUIDTYPE, n); }
+	uint16_t getFluidType() const
+	{
+		if (!attributes) {
+			return 0;
+		}
+		return static_cast<uint16_t>(getIntAttr(ITEM_ATTRIBUTE_FLUIDTYPE));
+	}
+
+	void setOwner(uint32_t owner) { setIntAttr(ITEM_ATTRIBUTE_OWNER, owner); }
+	uint32_t getOwner() const
+	{
+		if (!attributes) {
+			return 0;
+		}
+		return getIntAttr(ITEM_ATTRIBUTE_OWNER);
+	}
+
+	void setCorpseOwner(uint32_t corpseOwner) { setIntAttr(ITEM_ATTRIBUTE_CORPSEOWNER, corpseOwner); }
+	uint32_t getCorpseOwner() const
+	{
+		if (!attributes) {
+			return 0;
+		}
+		return getIntAttr(ITEM_ATTRIBUTE_CORPSEOWNER);
+	}
+
+	void setDuration(int32_t time) { setIntAttr(ITEM_ATTRIBUTE_DURATION, std::max<int32_t>(0, time)); }
+	void setDurationTimestamp(int64_t timestamp) { setIntAttr(ITEM_ATTRIBUTE_DURATION_TIMESTAMP, timestamp); }
+	int32_t getDuration() const {
+		ItemDecayState_t decayState = getDecaying();
+		if (decayState == DECAYING_TRUE || decayState == DECAYING_STOPPING) {
+			return std::max<int32_t>(0, static_cast<int32_t>(getIntAttr(ITEM_ATTRIBUTE_DURATION_TIMESTAMP) - OTSYS_TIME()));
+		} else {
+			return getIntAttr(ITEM_ATTRIBUTE_DURATION);
+		}
+	}
+
+	void setDecaying(ItemDecayState_t decayState) { setIntAttr(ITEM_ATTRIBUTE_DECAYSTATE, decayState); }
+	ItemDecayState_t getDecaying() const
+	{
+		if (!attributes) {
+			return DECAYING_FALSE;
+		}
+		return static_cast<ItemDecayState_t>(getIntAttr(ITEM_ATTRIBUTE_DECAYSTATE));
+	}
+
+	int32_t getDecayTimeMin() const
+	{
+		if (hasAttribute(ITEM_ATTRIBUTE_DURATION_MIN)) {
+			return getIntAttr(ITEM_ATTRIBUTE_DURATION_MIN);
+		}
+		return items[id].decayTimeMin;
+	}
+	int32_t getDecayTimeMax() const
+	{
+		if (hasAttribute(ITEM_ATTRIBUTE_DURATION_MAX)) {
+			return getIntAttr(ITEM_ATTRIBUTE_DURATION_MAX);
+		}
+		return items[id].decayTimeMax;
+	}
+
+	bool isEquipped() const;
+
+	bool decayImbuements(bool infight);
+
+	static std::string getNameDescription(const ItemType& it, const Item* item = nullptr, int32_t subType = -1,
+	                                      bool addArticle = true);
+	static std::string getWeightDescription(const ItemType& it, uint32_t weight, uint32_t count = 1);
+
+	std::string getNameDescription() const;
+	std::string getWeightDescription() const;
+	uint64_t getLootMessageValue() const;
+
+	// serialization
+	virtual Attr_ReadValue readAttr(AttrTypes_t attr, PropStream& propStream);
+	bool unserializeAttr(PropStream& propStream);
+	virtual bool unserializeItemNode(OTB::Loader&, const OTB::Node&, PropStream& propStream);
+
+	virtual void serializeAttr(PropWriteStream& propWriteStream) const;
+
+	bool isPushable() const override final { return isMoveable(); }
+	int32_t getThrowRange() const override final { return (isPickupable() ? 15 : 2); }
+
+	uint16_t getID() const { return id; }
+	uint16_t getClientID() const { return items[id].id; }
+	void setID(uint16_t newid);
+
+	// Returns the player that is holding this item in his inventory
+	const Player* getHoldingPlayer() const;
+
+	WeaponType_t getWeaponType() const { return items[id].weaponType; }
+	std::vector<std::shared_ptr<AugmentInfo>> getAugments() const { return items[id].augments; }
+	std::vector<std::shared_ptr<AugmentInfo>> getAugmentsBySpellNameAndType(std::string_view spellName,
+	                                                                       Augment_t augmentType) const
+	{
+		std::vector<std::shared_ptr<AugmentInfo>> augments;
+		for (const auto& augment : items[id].augments) {
+			if (augment && augment->type == augmentType && caseInsensitiveEqual(augment->spellName, spellName)) {
+				augments.emplace_back(augment);
+			}
+		}
+		return augments;
+	}
+	std::vector<std::shared_ptr<AugmentInfo>> getAugmentsBySpellName(std::string_view spellName) const
+	{
+		std::vector<std::shared_ptr<AugmentInfo>> augments;
+		for (const auto& augment : items[id].augments) {
+			if (augment && caseInsensitiveEqual(augment->spellName, spellName)) {
+				augments.emplace_back(augment);
+			}
+		}
+		return augments;
+	}
+	Ammo_t getAmmoType() const { return items[id].ammoType; }
+	uint8_t getShootRange() const
+	{
+		if (hasAttribute(ITEM_ATTRIBUTE_SHOOTRANGE)) {
+			return getIntAttr(ITEM_ATTRIBUTE_SHOOTRANGE);
+		}
+		return items[id].shootRange;
+	}
+
+	virtual uint32_t getWeight() const;
+	uint32_t getBaseWeight() const
+	{
+		if (hasAttribute(ITEM_ATTRIBUTE_WEIGHT)) {
+			return getIntAttr(ITEM_ATTRIBUTE_WEIGHT);
+		}
+		return items[id].weight;
+	}
+
+	uint8_t getWeightReduction() const
+	{
+		return items[id].weightReduction;
+	}
+
+	int32_t getAttack() const
+	{
+		if (hasAttribute(ITEM_ATTRIBUTE_ATTACK)) {
+			return getIntAttr(ITEM_ATTRIBUTE_ATTACK);
+		}
+		return items[id].attack;
+	}
+	uint32_t getAttackSpeed() const
+	{
+		if (hasAttribute(ITEM_ATTRIBUTE_ATTACK_SPEED)) {
+			return getIntAttr(ITEM_ATTRIBUTE_ATTACK_SPEED);
+		}
+		return items[id].attackSpeed;
+	}
+	uint32_t getAttackSpeedPercent() const { return items[id].attackSpeedPercent; }
+	uint32_t getDamagePercent() const { return items[id].damagePercent; }
+	uint32_t getDamageReductionPercent() const { return items[id].damageReductionPercent; }
+	int32_t getArmor() const
+	{
+		if (hasAttribute(ITEM_ATTRIBUTE_ARMOR)) {
+			return getIntAttr(ITEM_ATTRIBUTE_ARMOR);
+		}
+		return items[id].armor;
+	}
+	int32_t getDefense() const
+	{
+		if (hasAttribute(ITEM_ATTRIBUTE_DEFENSE)) {
+			return getIntAttr(ITEM_ATTRIBUTE_DEFENSE);
+		}
+		return items[id].defense;
+	}
+	int32_t getExtraDefense() const
+	{
+		if (hasAttribute(ITEM_ATTRIBUTE_EXTRADEFENSE)) {
+			return getIntAttr(ITEM_ATTRIBUTE_EXTRADEFENSE);
+		}
+		return items[id].extraDefense;
+	}
+	int32_t getSlotPosition() const { return items[id].slotPosition; }
+	int8_t getHitChance() const
+	{
+		if (hasAttribute(ITEM_ATTRIBUTE_HITCHANCE)) {
+			return static_cast<int8_t>(getIntAttr(ITEM_ATTRIBUTE_HITCHANCE));
+		}
+		return items[id].hitChance;
+	}
+
+	int32_t getReduceSkillLoss() const
+	{
+		return items[id].reduceSkillLoss;
+	}
+
+	int32_t getDropBonus() const
+	{
+		return items[id].dropBonus;
+	}
+
+	uint32_t getWorth() const;
+	LightInfo getLightInfo() const;
+
+	void setReflect(CombatType_t combatType, const Reflect& reflect) { getAttributes()->reflect[combatType] = reflect; }
+	Reflect getReflect(CombatType_t combatType, bool total = true) const;
+
+	void setBoostPercent(CombatType_t combatType, uint16_t value) { getAttributes()->boostPercent[combatType] = value; }
+	uint16_t getBoostPercent(CombatType_t combatType, bool total = true) const;
+
+	int32_t getPerfectShotDamage() const;
+	uint8_t getPerfectShotRange() const;
+
+	uint8_t getTier() const
+	{
+		if (!ConfigManager::getBoolean(ConfigManager::FORGE_SYSTEM_ENABLED)) {
+			return 0;
+		}
+		if (!hasAttribute(ITEM_ATTRIBUTE_TIER)) {
+			return 0;
+		}
+		return static_cast<uint8_t>(getIntAttr(ITEM_ATTRIBUTE_TIER));
+	}
+	void setTier(uint8_t tier);
+	uint8_t getClassification() const
+	{
+		if (!ConfigManager::getBoolean(ConfigManager::FORGE_SYSTEM_ENABLED)) {
+			return 0;
+		}
+		if (hasAttribute(ITEM_ATTRIBUTE_CLASSIFICATION)) {
+			return static_cast<uint8_t>(getIntAttr(ITEM_ATTRIBUTE_CLASSIFICATION));
+		}
+		return static_cast<uint8_t>(items[id].classification);
+	}
+	void setClassification(uint8_t classification)
+	{
+		if (!ConfigManager::getBoolean(ConfigManager::FORGE_SYSTEM_ENABLED)) {
+			return;
+		}
+		setIntAttr(ITEM_ATTRIBUTE_CLASSIFICATION, classification);
+	}
+
+	double getFatalChance() const;
+	double getDodgeChance() const;
+	double getMomentumChance() const;
+	double getTranscendenceChance() const;
+
+	bool hasProperty(ITEMPROPERTY prop) const;
+	bool isBlocking() const { return items[id].blockSolid; }
+	bool isStackable() const { return items[id].stackable; }
+	bool isAlwaysOnTop() const { return items[id].alwaysOnTop; }
+	bool isGroundTile() const { return items[id].isGroundTile(); }
+	bool isMagicField() const { return items[id].isMagicField(); }
+	bool isCarpet() const { return items[id].isCarpet(); }
+	bool canReceiveAutoCarpet() const { return isBlocking() && isAlwaysOnTop() && !items[id].hasHeight; }
+	bool isMoveable() const { return items[id].moveable; }
+	bool isPickupable() const { return items[id].isPickupable(); }
+	bool isUseable() const { return items[id].useable; }
+	bool isHangable() const { return items[id].isHangable; }
+	bool isRotatable() const
+	{
+		const ItemType& it = items[id];
+		return it.rotatable && it.rotateTo;
+	}
+	bool hasWalkStack() const { return items[id].walkStack; }
+	bool isSupply() const { return items[id].isSupply(); }
+
+	void setStoreItem(bool storeItem) { setIntAttr(ITEM_ATTRIBUTE_STOREITEM, static_cast<int64_t>(storeItem)); }
+	bool isStoreItem() const
+	{
+		if (hasAttribute(ITEM_ATTRIBUTE_STOREITEM)) {
+			return getIntAttr(ITEM_ATTRIBUTE_STOREITEM) == 1;
+		}
+		return items[id].storeItem;
+	}
+
+	bool isExerciseWeapon() const
+	{
+		switch (id) {
+			case 28540:
+			case 28541:
+			case 28542:
+			case 28543:
+			case 28544:
+			case 28545:
+			case 28552:
+			case 28553:
+			case 28554:
+			case 28555:
+			case 28556:
+			case 28557:
+			case 35279:
+			case 35280:
+			case 35281:
+			case 35282:
+			case 35283:
+			case 35284:
+			case 35285:
+			case 35286:
+			case 35287:
+			case 35288:
+			case 35289:
+			case 35290:
+			case 44064:
+			case 44065:
+			case 44066:
+			case 44067:
+			case 50292:
+			case 50293:
+			case 50294:
+			case 50295:
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	// UID tracking system for non-stackable items (anti-dupe)
+	[[nodiscard]] uint64_t getItemUID() const noexcept;
+	void setItemUID(uint64_t uid) noexcept;
+	[[nodiscard]] bool hasItemUID() const noexcept;
+	[[nodiscard]] static uint64_t generateItemUID() noexcept;
+
+	std::string_view getName() const
+	{
+		if (hasAttribute(ITEM_ATTRIBUTE_NAME)) {
+			return getStrAttr(ITEM_ATTRIBUTE_NAME);
+		}
+		return items[id].name;
+	}
+	std::string_view getPluralName() const
+	{
+		if (hasAttribute(ITEM_ATTRIBUTE_PLURALNAME)) {
+			return getStrAttr(ITEM_ATTRIBUTE_PLURALNAME);
+		}
+		return items[id].getPluralName();
+	}
+	std::string_view getArticle() const
+	{
+		if (hasAttribute(ITEM_ATTRIBUTE_ARTICLE)) {
+			return getStrAttr(ITEM_ATTRIBUTE_ARTICLE);
+		}
+		return items[id].article;
+	}
+
+	uint8_t getStackSize() const
+	{
+		if (isStackable()) {
+			return items[id].stackSize;
+		}
+		return 1;
+	}
+
+	// get the number of items
+	uint16_t getItemCount() const { return count; }
+	void setItemCount(uint8_t n) { count = n; }
+
+	static uint32_t countByType(const Item* i, int32_t subType)
+	{
+		if (subType == -1 || subType == i->getSubType()) {
+			return i->getItemCount();
+		}
+
+		return 0;
+	}
+
+	void setDefaultSubtype();
+	uint16_t getSubType() const;
+	void setSubType(uint16_t n);
+
+	void setUniqueId(uint16_t n);
+
+	void setDefaultDuration();
+	uint32_t getDefaultDurationMin() const { return items[id].decayTimeMin * 1000; }
+	uint32_t getDefaultDurationMax() const { return items[id].decayTimeMax * 1000; }
+	bool canDecay() const;
+
+	virtual bool canRemove() const { return true; }
+	virtual bool canTransform() const { return true; }
+	virtual void onRemoved();
+	virtual void onTradeEvent(TradeEvents_t, Player*) {}
+
+	virtual void startDecaying();
+	virtual void stopDecaying();
+
+	bool isLoadedFromMap() const { return loadedFromMap; }
+	void setLoadedFromMap(bool value) { loadedFromMap = value; }
+	bool isCleanable() const
+	{
+		return !loadedFromMap && canRemove() && isPickupable() && !hasAttribute(ITEM_ATTRIBUTE_UNIQUEID) &&
+		       !hasAttribute(ITEM_ATTRIBUTE_ACTIONID);
+	}
+
+	std::unique_ptr<ItemAttributes>& getAttributes()
+	{
+		if (!attributes) {
+			attributes = std::make_unique<ItemAttributes>();
+		}
+		return attributes;
+	}
+
+	Cylinder* getParent() const override { return parent; }
+	void setParent(Cylinder* cylinder) override { parent = cylinder; }
+	Cylinder* getTopParent();
+	const Cylinder* getTopParent() const;
+	Tile* getTile() override;
+	const Tile* getTile() const override;
+	bool isRemoved() const override { return !parent || parent->isRemoved(); }
+
+	uint16_t getImbuementSlots() const;
+	uint16_t getFreeImbuementSlots() const;
+	bool canImbue() const;
+	bool addImbuementSlots(const uint16_t amount);
+	bool removeImbuementSlots(const uint16_t amount, const bool destroyImbues = false);
+	bool hasImbuementType(const ImbuementType imbuetype) const;
+	bool hasImbuement(const std::shared_ptr<Imbuement>& imbuement) const;
+	bool hasImbuements() const;
+	bool canApplyImbuement(uint16_t categoryId, uint8_t tier) const;
+	bool addImbuement(std::shared_ptr<Imbuement> imbuement, bool created = true);
+	bool removeImbuement(std::shared_ptr<Imbuement> imbuement, bool decayed = false);
+	std::vector<std::shared_ptr<Imbuement>>& getImbuements();
+
+protected:
+	ObserverPtr<Cylinder> parent = nullptr;
+
+	uint16_t id; // the same id as in ItemType
+
+private:
+	std::string getWeightDescription(uint32_t weight) const;
+
+	std::unique_ptr<ItemAttributes> attributes;
+
+	uint16_t imbuementSlots = 0;
+	std::vector<std::shared_ptr<Imbuement>> imbuements;
+
+	uint8_t count = 1; // number of stacked items
+
+	bool loadedFromMap = false;
+
+	// Don't add variables here, use the ItemAttribute class.
+	friend class Decay;
+};
+
+using ItemList = std::list<std::shared_ptr<Item>>;
+using ItemDeque = std::deque<std::shared_ptr<Item>>;
+
+#endif

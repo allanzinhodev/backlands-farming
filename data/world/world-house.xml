@@ -1,0 +1,64 @@
+<?xml version="1.0"?>
+<houses>
+	<house name="Classic City House #1" houseid="1" entryx="995" entryy="983" entryz="7" rent="0" townid="1" size="10" />
+	<house name="Classic City House #2" houseid="2" entryx="990" entryy="982" entryz="7" rent="0" townid="1" size="14" />
+	<house name="Classic City House #3" houseid="3" entryx="986" entryy="995" entryz="7" rent="0" guildhall="true" townid="1" size="53" />
+	<house name="Classic City House #4" houseid="4" entryx="995" entryy="981" entryz="7" rent="0" townid="1" size="15" />
+	<house name="Classic City House #5" houseid="5" entryx="987" entryy="981" entryz="7" rent="0" townid="1" size="16" />
+	<house name="Classic City House #6" houseid="6" entryx="981" entryy="981" entryz="7" rent="0" townid="1" size="37" />
+	<house name="Classic City House #7" houseid="7" entryx="1013" entryy="989" entryz="7" rent="0" guildhall="true" townid="1" size="63" />
+	<house name="Classic City House #8" houseid="8" entryx="1013" entryy="989" entryz="6" rent="0" townid="1" size="31" />
+	<house name="Classic City House #9" houseid="9" entryx="1011" entryy="989" entryz="6" rent="0" townid="1" size="20" />
+	<house name="Classic City House #10" houseid="10" entryx="1015" entryy="989" entryz="6" rent="0" townid="1" size="14" />
+	<house name="Classic City House #11" houseid="11" entryx="1024" entryy="982" entryz="7" rent="0" townid="1" size="5" />
+	<house name="Classic City House #12" houseid="12" entryx="1023" entryy="975" entryz="7" rent="0" townid="1" size="23" />
+	<house name="Classic City House #13" houseid="13" entryx="1012" entryy="969" entryz="7" rent="0" townid="1" size="26" />
+	<house name="Classic City House #14" houseid="14" entryx="1005" entryy="969" entryz="7" rent="0" townid="1" size="26" />
+	<house name="Classic City House #15" houseid="15" entryx="1009" entryy="964" entryz="7" rent="0" townid="1" size="22" />
+	<house name="Classic City House #16" houseid="16" entryx="1009" entryy="964" entryz="6" rent="0" townid="1" size="31" />
+	<house name="Classic City House #17" houseid="17" entryx="1021" entryy="963" entryz="5" rent="0" townid="1" size="7" />
+	<house name="Classic City House #18" houseid="18" entryx="1010" entryy="952" entryz="7" rent="0" townid="1" size="14" />
+	<house name="Classic City House #19" houseid="19" entryx="1004" entryy="952" entryz="7" rent="0" townid="1" size="14" />
+	<house name="Classic City House #20" houseid="20" entryx="999" entryy="957" entryz="7" rent="0" townid="1" size="19" />
+	<house name="Classic City House #21" houseid="21" entryx="984" entryy="957" entryz="7" rent="0" townid="1" size="19" />
+	<house name="Classic City House #22" houseid="22" entryx="979" entryy="964" entryz="7" rent="0" townid="1" size="17" />
+	<house name="Classic City House #23" houseid="23" entryx="978" entryy="965" entryz="7" rent="0" townid="1" size="11" />
+	<house name="Classic City House #24" houseid="24" entryx="983" entryy="950" entryz="7" rent="0" townid="1" size="10" />
+	<house name="Classic City House #25" houseid="25" entryx="988" entryy="943" entryz="7" rent="0" townid="1" size="10" />
+	<house name="Classic City House #26" houseid="26" entryx="986" entryy="942" entryz="7" rent="0" guildhall="true" townid="1" size="91" />
+	<house name="Classic City House #27" houseid="27" entryx="992" entryy="941" entryz="7" rent="0" guildhall="true" townid="1" size="61" />
+	<house name="Timberport House #28" houseid="28" entryx="761" entryy="985" entryz="7" rent="0" townid="2" size="28" />
+	<house name="Timberport House #29" houseid="29" entryx="766" entryy="976" entryz="7" rent="0" townid="2" size="10" />
+	<house name="Timberport House #30" houseid="30" entryx="771" entryy="981" entryz="7" rent="0" townid="2" size="16" />
+	<house name="Timberport House #31" houseid="31" entryx="775" entryy="980" entryz="7" rent="0" townid="2" size="23" />
+	<house name="Timberport House #32" houseid="32" entryx="774" entryy="978" entryz="7" rent="0" townid="2" size="68" />
+	<house name="Timberport House #33" houseid="33" entryx="775" entryy="981" entryz="6" rent="0" townid="2" size="65" />
+	<house name="Timberport House #34" houseid="34" entryx="774" entryy="978" entryz="6" rent="0" townid="2" size="4" />
+	<house name="Timberport House #35" houseid="35" entryx="757" entryy="975" entryz="7" rent="0" townid="2" size="46" />
+	<house name="Timberport House #36" houseid="36" entryx="750" entryy="969" entryz="7" rent="0" townid="2" size="106" />
+	<house name="Timberport House #37" houseid="37" entryx="764" entryy="956" entryz="7" rent="0" townid="2" size="14" />
+	<house name="Timberport House #38" houseid="38" entryx="761" entryy="956" entryz="6" rent="0" townid="2" size="28" />
+	<house name="Timberport House #39" houseid="39" entryx="744" entryy="979" entryz="7" rent="0" townid="2" size="40" />
+	<house name="Classic City House #28" houseid="40" entryx="997" entryy="948" entryz="7" rent="0" townid="1" size="8" />
+	<house name="Sandstone House #1" houseid="41" entryx="998" entryy="1095" entryz="7" rent="0" townid="3" size="56" />
+	<house name="Sandstone House #2" houseid="42" entryx="1015" entryy="1099" entryz="7" rent="0" townid="3" size="43" />
+	<house name="Sandstone House #3" houseid="43" entryx="1012" entryy="1107" entryz="7" rent="0" townid="3" size="62" />
+	<house name="Sandstone House #4" houseid="44" entryx="1023" entryy="1111" entryz="7" rent="0" townid="3" size="30" />
+	<house name="Sandstone House #5" houseid="45" entryx="1031" entryy="1111" entryz="7" rent="0" townid="3" size="79" />
+	<house name="Sandstone House #6" houseid="46" entryx="1024" entryy="1114" entryz="7" rent="0" townid="3" size="58" />
+	<house name="Sandstone House #7" houseid="47" entryx="1038" entryy="1114" entryz="7" rent="0" townid="3" size="36" />
+	<house name="Sandstone House #8" houseid="48" entryx="1026" entryy="1128" entryz="7" rent="0" townid="3" size="80" />
+	<house name="Sandstone House #9" houseid="49" entryx="1031" entryy="1138" entryz="7" rent="0" townid="3" size="41" />
+	<house name="Sandstone House #10" houseid="50" entryx="1027" entryy="1145" entryz="7" rent="0" townid="3" size="40" />
+	<house name="Sandstone House #11" houseid="51" entryx="1023" entryy="1140" entryz="7" rent="0" townid="3" size="60" />
+	<house name="Sandstone House #12" houseid="52" entryx="1006" entryy="1144" entryz="7" rent="0" townid="3" size="58" />
+	<house name="Sandstone House #13" houseid="53" entryx="1001" entryy="1137" entryz="7" rent="0" townid="3" size="86" />
+	<house name="Sandstone House #14" houseid="54" entryx="985" entryy="1136" entryz="7" rent="0" townid="3" size="58" />
+	<house name="Sandstone House #15" houseid="55" entryx="985" entryy="1142" entryz="7" rent="0" townid="3" size="95" />
+	<house name="Sandstone House #16" houseid="56" entryx="983" entryy="1145" entryz="7" rent="0" townid="3" size="58" />
+	<house name="Sandstone House #17" houseid="57" entryx="976" entryy="1133" entryz="7" rent="0" guildhall="true" townid="3" size="327" />
+	<house name="Sandstone House #18" houseid="58" entryx="981" entryy="1129" entryz="7" rent="0" townid="3" size="75" />
+	<house name="Sandstone House #19" houseid="59" entryx="992" entryy="1120" entryz="7" rent="0" townid="3" size="56" />
+	<house name="Sandstone House #20" houseid="60" entryx="992" entryy="1115" entryz="6" rent="0" townid="3" size="38" />
+	<house name="Sandstone House #21" houseid="61" entryx="1009" entryy="1136" entryz="6" rent="0" townid="3" size="62" />
+</houses>

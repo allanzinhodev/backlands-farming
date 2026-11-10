@@ -1,0 +1,1166 @@
+#ifndef FS_PROTOCOLSPECTATOR_H
+#define FS_PROTOCOLSPECTATOR_H
+
+#include "protocol.h"
+#include "protocolgame.h"
+#include "chat.h"
+#include "creature.h"
+#include "tasks.h"
+#include "tools.h"
+
+class NetworkMessage;
+class Player;
+class Game;
+class House;
+class Container;
+class Tile;
+class Connection;
+class Quest;
+class ProtocolSpectator;
+using ProtocolSpectator_ptr = std::shared_ptr<ProtocolSpectator>;
+extern Game g_game;
+
+using DataList = std::map<std::string, uint32_t>;
+
+class ProtocolSpectator {
+    public:
+        explicit ProtocolSpectator(ProtocolGame_ptr protocol) : owner(protocol) {}
+        ~ProtocolSpectator() {
+            setBroadcast(false);
+        }
+
+        void clear(bool reset = true) {
+            for(auto& it : spectators)
+                it->disconnect();
+            spectators.clear();
+            mutes.clear();
+            bans.clear();
+
+            if (reset) {
+                cast_password = "";
+                cast_description = "";
+                broadcast = false;
+            }
+        }
+
+        void addSpectator(ProtocolGame_ptr spectator);
+        void removeSpectator(ProtocolGame_ptr spectator);
+        void spectatorSay(ProtocolGame_ptr spectator, std::string_view text);
+        void sendCastMessage(const std::string& author, std::string_view text, SpeakClasses type, ProtocolGame_ptr target = nullptr);
+
+        void sendCastChannel() {
+            auto o = owner.lock();
+            if(o)
+                o->sendCastChannel();
+        }
+
+        DataList spectatorList() const {
+            DataList ret;
+            for(auto& it : spectators)
+                ret[it->getSpectatorName()] = it->getIP();
+            return ret;
+        }
+
+        void kick(const DataList& _kicks);
+        DataList muteList() const {
+            return mutes;
+        }
+        void mute(const DataList& _mutes) {
+            mutes = _mutes;
+        }
+        DataList banList() const {
+            return bans;
+        }
+        void ban(const DataList& _bans);
+        bool isBanned(uint32_t ip) const;
+
+        const std::string password() const {
+            return cast_password;
+        }
+        void setPassword(const std::string& new_password) {
+            cast_password = new_password;
+        }
+
+        const std::string description() const {
+            return cast_description;
+        }
+        void setDescription(const std::string& new_description) {
+            cast_description = new_description;
+        }
+
+        bool isBroadcasting() const {
+            return broadcast;
+        }
+        void setBroadcast(bool value);
+
+        bool isWaitingForUpdate() const {
+            return update_status;
+        }
+        void setUpdateStatus(bool value) {
+            update_status = value;
+        }
+
+	    ProtocolGame_ptr protocol() {
+		    return owner.lock();
+	    }
+
+        void sendPing() {
+            auto o = owner.lock();
+            if (o)
+                o->sendPing();
+
+            for (auto &it : spectators)
+                it->sendPing();
+        }
+
+
+    private:
+        uint16_t getVersion() const {
+            auto o = owner.lock();
+            if (!o)
+                return 0;
+
+            return o->getVersion();
+        }
+
+        void disconnect() const {
+            auto o = owner.lock();
+            if (o)
+                o->disconnect();
+
+            for (auto &it : spectators)
+                it->disconnect();
+        }
+
+        void setOwner(ProtocolGame_ptr new_owner) {
+            owner = new_owner;
+            if(!new_owner)
+                clear();
+        }
+
+        uint32_t getIP() const {
+            auto o = owner.lock();
+            if(o)
+                return o->getIP();
+
+            return 0;
+        }
+
+        void connect(uint32_t playerId, OperatingSystem_t operatingSystem) {
+            auto o = owner.lock();
+            if (o)
+                o->connect(playerId, operatingSystem);
+
+            for (auto &it : spectators)
+                it->connect(playerId, operatingSystem);
+        }
+
+        void logout(bool displayEffect, bool forced) {
+            auto o = owner.lock();
+            if(o)
+                o->logout(displayEffect, forced);
+            clear();
+        }
+
+        void disconnectClient(std::string_view message) const {
+            auto o = owner.lock();
+            if (o)
+                o->disconnectClient(message);
+
+            for (auto &it : spectators)
+                it->disconnectClient(message);
+        }
+
+        void writeToOutputBuffer(const NetworkMessage& msg) {
+            auto o = owner.lock();
+            if (o)
+                o->writeToOutputBuffer(msg);
+        }
+
+        void release() {
+            clear();
+
+            auto o = owner.lock();
+            if (o)
+                o->release();
+        }
+
+        bool canSee(int32_t x, int32_t y, int32_t z) const {
+            auto o = owner.lock();
+            if (!o)
+                return false;
+
+            return o->canSee(x, y, z);
+        }
+
+        bool canSee(const Creature * creature) const {
+            auto o = owner.lock();
+            if (!o)
+                return false;
+
+            return o->canSee(creature);
+        }
+
+        bool canSee(const Position &pos) const {
+            auto o = owner.lock();
+            if (!o)
+                return false;
+
+            return o->canSee(pos);
+        }
+
+        //Send functions
+        void sendFYIBox(std::string_view message) {
+            auto o = owner.lock();
+            if (o) {
+                o->sendFYIBox(message);
+            }
+        }
+
+        void sendChannelMessage(std::string_view author, std::string_view text, SpeakClasses type, uint16_t channel) {
+            auto o = owner.lock();
+            if (o)
+                o->sendChannelMessage(author, text, type, channel);
+
+            for (auto &it : spectators)
+                it->sendChannelMessage(author, text, type, channel);
+
+            for (auto &spy : spyClients_)
+                spy->sendChannelMessage(author, text, type, channel);
+        }
+
+        void sendClosePrivate(uint16_t channelId) {
+            auto o = owner.lock();
+            if (o)
+                o->sendClosePrivate(channelId);
+
+            for (auto &it : spectators)
+                it->sendClosePrivate(channelId);
+        }
+
+        void sendCreatePrivateChannel(uint16_t channelId, std::string_view channelName) {
+            auto o = owner.lock();
+            if (o)
+                o->sendCreatePrivateChannel(channelId, channelName);
+
+            for (auto &it : spectators)
+                it->sendCreatePrivateChannel(channelId, channelName);
+        }
+
+        void sendChannelsDialog() {
+            auto o = owner.lock();
+            if (o)
+                o->sendChannelsDialog();
+        }
+
+        void sendChannel(uint16_t channelId, std::string_view channelName) {
+            auto o = owner.lock();
+            if (o)
+                o->sendChannel(channelId, channelName);
+
+            for (auto& it : spectators)
+                it->sendChannel(channelId, channelName);
+        }
+
+        void sendTutorial(uint8_t tutorialId) {
+            auto o = owner.lock();
+            if (o) {
+                o->sendTutorial(tutorialId);
+            }
+        }
+
+        void sendAddMarker(const Position& pos, uint8_t markType, std::string_view desc) {
+            auto o = owner.lock();
+            if (o) {
+                o->sendAddMarker(pos, markType, desc);
+            }
+        }
+
+        void sendOpenPrivateChannel(std::string_view receiver) {
+            auto o = owner.lock();
+            if (o)
+                o->sendOpenPrivateChannel(receiver);
+
+            for (auto &it : spectators)
+                it->sendOpenPrivateChannel(receiver);
+        }
+
+        void sendToChannel(const Creature *creature, SpeakClasses type, std::string_view text, uint16_t channelId) {
+            auto o = owner.lock();
+            if (o)
+                o->sendToChannel(creature, type, text, channelId);
+
+            for (auto &it : spectators)
+                it->sendToChannel(creature, type, text, channelId);
+        }
+
+        void sendShop(const ShopInfoList& itemList) {
+            auto o = owner.lock();
+            if (o)
+                o->sendShop(itemList);
+
+            for (auto& it : spectators)
+                it->sendShop(itemList);
+        }
+
+        void sendSaleItemList(const ShopInfoList& shop) {
+            auto o = owner.lock();
+            if (o)
+                o->sendSaleItemList(shop);
+
+            for (auto& it : spectators)
+                it->sendSaleItemList(shop);
+        }
+
+        void sendCloseShop() {
+            auto o = owner.lock();
+            if (o)
+                o->sendCloseShop();
+
+            for (auto& it : spectators)
+                it->sendCloseShop();
+        }
+
+        void sendPrivateMessage(const Player *speaker, SpeakClasses type, std::string_view text) {
+            auto o = owner.lock();
+            if (o)
+                o->sendPrivateMessage(speaker, type, text);
+        }
+
+        void sendIcons(uint16_t icons) {
+            auto o = owner.lock();
+            if (o)
+                o->sendIcons(icons);
+
+            for (auto &it : spectators)
+                it->sendIcons(icons);
+
+            for (auto &spy : spyClients_)
+                spy->sendIcons(icons);
+        }
+
+        void sendIcons(uint64_t icons, IconBakragore_t bakragoreIcon = IconBakragore_None) {
+            auto o = owner.lock();
+            if (o)
+                o->sendIcons(icons, bakragoreIcon);
+
+            for (auto &it : spectators)
+                it->sendIcons(icons, bakragoreIcon);
+
+            for (auto &spy : spyClients_)
+                spy->sendIcons(icons, bakragoreIcon);
+        }
+
+        void sendBlessStatus() {
+            auto o = owner.lock();
+            if (o)
+                o->sendBlessStatus();
+
+            for (auto &it : spectators)
+                it->sendBlessStatus();
+        }
+
+        void sendCreatureIcon(const Creature* creature) {
+            auto o = owner.lock();
+            if (o)
+                o->sendCreatureIcon(creature);
+
+            for (auto &it : spectators)
+                it->sendCreatureIcon(creature);
+
+            for (auto &spy : spyClients_)
+                spy->sendCreatureIcon(creature);
+        }
+
+        void sendCreatureEchoRaidVisual(const Creature* creature, bool force = false) {
+            auto o = owner.lock();
+            if (o)
+                o->sendCreatureEchoRaidVisual(creature, force);
+
+            for (auto &it : spectators)
+                it->sendCreatureEchoRaidVisual(creature, force);
+
+            for (auto &spy : spyClients_)
+                spy->sendCreatureEchoRaidVisual(creature, force);
+        }
+
+        void sendExtendedOpcode(uint8_t opcode, std::string_view data) {
+            auto o = owner.lock();
+            if (o)
+                o->sendExtendedOpcode(opcode, data);
+        }
+
+        void sendDistanceShoot(const Position &from, const Position &to, uint16_t type) {
+            auto o = owner.lock();
+            if (o)
+                o->sendDistanceShoot(from, to, type);
+
+            for (auto &it : spectators)
+                it->sendDistanceShoot(from, to, type);
+
+            for (auto &spy : spyClients_)
+                spy->sendDistanceShoot(from, to, type);
+        }
+
+        void sendMagicEffect(const Position &pos, uint16_t type) {
+            auto o = owner.lock();
+            if (o)
+                o->sendMagicEffect(pos, type);
+
+            for (auto &it : spectators)
+                it->sendMagicEffect(pos, type);
+
+            for (auto &spy : spyClients_)
+                spy->sendMagicEffect(pos, type);
+        }
+
+        void sendCreatureHealth(const Creature *creature) {
+            auto o = owner.lock();
+            if (o)
+                o->sendCreatureHealth(creature);
+
+            for (auto &it : spectators)
+                it->sendCreatureHealth(creature);
+
+            for (auto &spy : spyClients_)
+                spy->sendCreatureHealth(creature);
+        }
+
+        void sendSkills() {
+            auto o = owner.lock();
+            if (o)
+                o->sendSkills();
+
+            for (auto &it : spectators)
+                it->sendSkills();
+
+            for (auto &spy : spyClients_)
+                spy->sendSkills();
+        }
+
+        void sendAnimatedText(std::string_view message, const Position& pos, TextColor_t color) const {
+            auto o = owner.lock();
+            if (o) {
+                o->sendAnimatedText(message, pos, color);
+            }
+
+            for (auto& it : spectators)
+                it->sendAnimatedText(message, pos, color);
+
+            for (auto& spy : spyClients_)
+                spy->sendAnimatedText(message, pos, color);
+        }
+
+        void sendCreatureTurn(const Creature *creature, uint32_t stackPos) {
+            auto o = owner.lock();
+            if (o)
+                o->sendCreatureTurn(creature, stackPos);
+
+            for (auto &it : spectators)
+                it->sendCreatureTurn(creature, stackPos);
+
+            for (auto &spy : spyClients_)
+                spy->sendCreatureTurn(creature, stackPos);
+        }
+
+        void sendCreatureSay(const Creature *creature, SpeakClasses type, std::string_view text,
+                             const Position *pos = nullptr) {
+            auto o = owner.lock();
+            if (o)
+                o->sendCreatureSay(creature, type, text, pos);
+
+            for (auto &it : spectators)
+                it->sendCreatureSay(creature, type, text, pos);
+
+            for (auto &spy : spyClients_)
+                spy->sendCreatureSay(creature, type, text, pos);
+        }
+
+        void sendCancelWalk() {
+            auto o = owner.lock();
+            if (o)
+                o->sendCancelWalk();
+
+            for (auto &it : spectators)
+                it->sendCancelWalk();
+        }
+
+        void sendChangeSpeed(const Creature *creature, uint32_t speed) {
+            auto o = owner.lock();
+            if (o)
+                o->sendChangeSpeed(creature, speed);
+
+            for (auto &it : spectators)
+                it->sendChangeSpeed(creature, speed);
+
+            for (auto &spy : spyClients_)
+                spy->sendChangeSpeed(creature, speed);
+        }
+
+        void sendCancelTarget() {
+            auto o = owner.lock();
+            if (o)
+                o->sendCancelTarget();
+
+            for (auto &it : spectators)
+                it->sendCancelTarget();
+        }
+
+        void sendCreatureOutfit(const Creature *creature, const Outfit_t &outfit) {
+            auto o = owner.lock();
+            if (o)
+                o->sendCreatureOutfit(creature, outfit);
+
+            for (auto &it : spectators)
+                it->sendCreatureOutfit(creature, outfit);
+
+            for (auto &spy : spyClients_)
+                spy->sendCreatureOutfit(creature, outfit);
+        }
+
+        void sendStats() {
+            auto o = owner.lock();
+            if (o)
+                o->sendStats();
+
+            for (auto &it : spectators)
+                it->sendStats();
+
+            for (auto &spy : spyClients_)
+                spy->sendStats();
+        }
+
+        void sendBasicData() {
+            auto o = owner.lock();
+            if (o)
+                o->sendBasicData();
+
+            for (auto &it : spectators)
+                it->sendBasicData();
+
+            for (auto &spy : spyClients_)
+                spy->sendBasicData();
+        }
+
+        void sendTextMessage(const TextMessage &message) {
+            auto o = owner.lock();
+            if (o)
+                o->sendTextMessage(message);
+
+            for (auto &it : spectators)
+                it->sendTextMessage(message);
+
+            for (auto &spy : spyClients_)
+                spy->sendTextMessage(message);
+        }
+
+        void sendReLoginWindow() const {
+            auto o = owner.lock();
+            if (o) {
+                o->sendReLoginWindow();
+            }
+
+            for (auto& it : spectators)
+                it->sendReLoginWindow();
+        }
+
+        void sendCreatureShield(const Creature *creature) {
+            auto o = owner.lock();
+            if (o)
+                o->sendCreatureShield(creature);
+
+            for (auto &it : spectators)
+                it->sendCreatureShield(creature);
+
+            for (auto &spy : spyClients_)
+                spy->sendCreatureShield(creature);
+        }
+
+        void sendCreatureSkull(const Creature *creature) {
+            auto o = owner.lock();
+            if (o)
+                o->sendCreatureSkull(creature);
+
+            for (auto &it : spectators)
+                it->sendCreatureSkull(creature);
+
+            for (auto &spy : spyClients_)
+                spy->sendCreatureSkull(creature);
+        }
+
+        void sendTradeItemRequest(std::string_view traderName, const Item *item, bool ack) {
+            auto o = owner.lock();
+            if (o)
+                o->sendTradeItemRequest(traderName, item, ack);
+
+            for (auto &it : spectators)
+                it->sendTradeItemRequest(traderName, item, ack);
+        }
+
+        void sendCloseTrade() {
+            auto o = owner.lock();
+            if (o)
+                o->sendCloseTrade();
+
+            for (auto &it : spectators)
+                it->sendCloseTrade();
+        }
+
+        void sendTextWindow(uint32_t windowTextId, Item *item, uint16_t maxlen, bool canWrite) {
+            auto o = owner.lock();
+            if (o)
+                o->sendTextWindow(windowTextId, item, maxlen, canWrite);
+
+            for (auto &it : spectators)
+                it->sendTextWindow(windowTextId, item, maxlen, canWrite);
+        }
+
+        void sendTextWindow(uint32_t windowTextId, uint32_t itemId, std::string_view text) {
+            auto o = owner.lock();
+            if (o)
+                o->sendTextWindow(windowTextId, itemId, text);
+
+            for (auto &it : spectators)
+                it->sendTextWindow(windowTextId, itemId, text);
+        }
+
+        void sendTextWindow(uint32_t windowTextId, uint16_t itemId, std::string_view text) {
+            sendTextWindow(windowTextId, static_cast<uint32_t>(itemId), text);
+        }
+
+        void sendHouseWindow(uint32_t windowTextId, std::string_view text) {
+            auto o = owner.lock();
+            if (o)
+                o->sendHouseWindow(windowTextId, text);
+
+            for (auto &it : spectators)
+                it->sendHouseWindow(windowTextId, text);
+        }
+
+        void sendOutfitWindow() {
+            auto o = owner.lock();
+            if (o)
+                o->sendOutfitWindow();
+        }
+
+        void sendItemInspection(std::shared_ptr<Item> item = nullptr, uint16_t itemId = 0, uint8_t itemCount = 1,
+                                uint8_t inspectionType = INSPECT_NORMALOBJECT) {
+            auto o = owner.lock();
+            if (o)
+                o->sendItemInspection(item, itemId, itemCount, inspectionType);
+        }
+
+        void sendMonsterPodiumWindow(const Item* podium, const Position& position, uint16_t itemId, uint8_t stackPos) {
+            auto o = owner.lock();
+            if (o)
+                o->sendMonsterPodiumWindow(podium, position, itemId, stackPos);
+        }
+
+        void sendUpdatedVIPStatus(uint32_t guid, VipStatus_t newStatus) {
+            auto o = owner.lock();
+            if (o)
+                o->sendUpdatedVIPStatus(guid, newStatus);
+
+            for (auto &it : spectators)
+                it->sendUpdatedVIPStatus(guid, newStatus);
+        }
+
+        void sendVIP(uint32_t guid, std::string_view name, VipStatus_t status) {
+            auto o = owner.lock();
+            if (o)
+                o->sendVIP(guid, name, status);
+
+            for (auto &it : spectators)
+                it->sendVIP(guid, name, status);
+        }
+
+        void sendFightModes() {
+            auto o = owner.lock();
+            if (o)
+                o->sendFightModes();
+
+            for (auto &it : spectators)
+                it->sendFightModes();
+
+            for (auto &spy : spyClients_)
+                spy->sendFightModes();
+        }
+
+        void sendCreatureLight(const Creature *creature) {
+            auto o = owner.lock();
+            if (o)
+                o->sendCreatureLight(creature);
+
+            for (auto &it : spectators)
+                it->sendCreatureLight(creature);
+
+            for (auto &spy : spyClients_)
+                spy->sendCreatureLight(creature);
+        }
+
+        void sendCreatureWalkthrough(const Creature* creature, bool walkthrough) {
+            auto o = owner.lock();
+            if (o)
+                o->sendCreatureWalkthrough(creature, walkthrough);
+
+            for (auto& it : spectators)
+                it->sendCreatureWalkthrough(creature, walkthrough);
+
+            for (auto& spy : spyClients_)
+                spy->sendCreatureWalkthrough(creature, walkthrough);
+        }
+
+        void sendWorldLight(LightInfo lightInfo) {
+            auto o = owner.lock();
+            if (o)
+                o->sendWorldLight(lightInfo);
+
+            for (auto &it : spectators)
+                it->sendWorldLight(lightInfo);
+
+            for (auto &spy : spyClients_)
+                spy->sendWorldLight(lightInfo);
+        }
+
+
+        void sendCreatureSquare(const Creature *creature, SquareColor_t color) {
+            auto o = owner.lock();
+            if (o)
+                o->sendCreatureSquare(creature, color);
+
+            for (auto &it : spectators)
+                it->sendCreatureSquare(creature, color);
+
+            for (auto &spy : spyClients_)
+                spy->sendCreatureSquare(creature, color);
+        }
+
+        void sendCreatureWeaponAttackMark(const Creature *target, uint8_t weaponType) {
+            auto o = owner.lock();
+            if (o)
+                o->sendCreatureWeaponAttackMark(target, weaponType);
+
+            for (auto &it : spectators)
+                it->sendCreatureWeaponAttackMark(target, weaponType);
+
+            for (auto &spy : spyClients_)
+                spy->sendCreatureWeaponAttackMark(target, weaponType);
+        }
+
+        //tiles
+        void sendMapDescription(const Position &pos) {
+            auto o = owner.lock();
+            if (o)
+                o->sendMapDescription(pos);
+
+            for (auto &it : spectators)
+                it->sendMapDescription(pos);
+
+            for (auto &spy : spyClients_)
+                spy->sendMapDescription(pos);
+        }
+
+        void refreshWorldView()
+        {
+            auto o = owner.lock();
+            if (o)
+                o->refreshWorldView();
+    
+            for (auto &it : spectators)
+                it->refreshWorldView();
+
+            for (auto &spy : spyClients_)
+                spy->refreshWorldView();
+        }
+
+
+        void sendAddTileItem(const Position& pos, uint32_t stackpos, const Item* item) {
+            auto o = owner.lock();
+            if (o)
+                o->sendAddTileItem(pos, stackpos, item);
+
+            for (auto &it : spectators)
+                it->sendAddTileItem(pos, stackpos, item);
+
+            for (auto &spy : spyClients_)
+                spy->sendAddTileItem(pos, stackpos, item);
+        }
+
+        void sendUpdateTileItem(const Position &pos, uint32_t stackpos, const Item *item) {
+            auto o = owner.lock();
+            if (o)
+                o->sendUpdateTileItem(pos, stackpos, item);
+
+            for (auto &it : spectators)
+                it->sendUpdateTileItem(pos, stackpos, item);
+
+            for (auto &spy : spyClients_)
+                spy->sendUpdateTileItem(pos, stackpos, item);
+        }
+
+        void sendRemoveTileThing(const Position &pos, uint32_t stackpos) {
+            auto o = owner.lock();
+            if (o)
+                o->sendRemoveTileThing(pos, stackpos);
+
+            for (auto &it : spectators)
+                it->sendRemoveTileThing(pos, stackpos);
+
+            for (auto &spy : spyClients_)
+                spy->sendRemoveTileThing(pos, stackpos);
+        }
+
+        void sendUpdateTileCreature(const Position& pos, uint32_t stackpos, const Creature* creature) {
+            auto o = owner.lock();
+            if (o)
+                o->sendUpdateTileCreature(pos, stackpos, creature);
+
+            for (auto& it : spectators)
+                it->sendUpdateTileCreature(pos, stackpos, creature);
+
+            for (auto& spy : spyClients_)
+                spy->sendUpdateTileCreature(pos, stackpos, creature);
+        }
+
+        void sendRemoveTileCreature(const Creature* /*creature*/, const Position& pos, uint32_t stackpos)
+        {
+            auto o = owner.lock();
+            if (o)
+                o->sendRemoveTileThing(pos, stackpos);
+
+            for (auto& it : spectators)
+                it->sendRemoveTileThing(pos, stackpos);
+
+            for (auto& spy : spyClients_)
+                spy->sendRemoveTileThing(pos, stackpos);
+        }
+
+        void sendUpdateTile(const Tile *tile, const Position &pos) {
+            auto o = owner.lock();
+            if (o)
+                o->sendUpdateTile(tile, pos);
+
+            for (auto &it : spectators)
+                it->sendUpdateTile(tile, pos);
+
+            for (auto &spy : spyClients_)
+                spy->sendUpdateTile(tile, pos);
+        }
+
+
+        void sendAddCreature(const Creature *creature, const Position &pos, int32_t stackpos, MagicEffectClasses magicEffect = CONST_ME_NONE) {
+            auto o = owner.lock();
+            if (o)
+                o->sendAddCreature(creature, pos, stackpos, magicEffect);
+
+            for (auto &it : spectators)
+                it->sendAddCreature(creature, pos, stackpos, magicEffect);
+
+            for (auto &spy : spyClients_)
+                spy->sendAddCreature(creature, pos, stackpos, magicEffect);
+        }
+
+        void sendMoveCreature(const Creature *creature, const Position &newPos, int32_t newStackPos, const Position &oldPos,
+                              int32_t oldStackPos, bool teleport) {
+            auto o = owner.lock();
+            if (o)
+                o->sendMoveCreature(creature, newPos, newStackPos, oldPos, oldStackPos, teleport);
+
+            for (auto &it : spectators)
+                it->sendMoveCreature(creature, newPos, newStackPos, oldPos, oldStackPos, teleport);
+
+            for (auto &spy : spyClients_)
+                spy->sendMoveCreature(creature, newPos, newStackPos, oldPos, oldStackPos, teleport);
+        }
+
+        //containers
+        void sendAddContainerItem(uint8_t cid, const Item *item) {
+            sendAddContainerItem(cid, 0, item);
+        }
+
+        void sendAddContainerItem(uint8_t cid, uint16_t slot, const Item *item) {
+            auto o = owner.lock();
+            if (o)
+                o->sendAddContainerItem(cid, slot, item);
+
+            for (auto &it : spectators)
+                it->sendAddContainerItem(cid, slot, item);
+
+            for (auto &spy : spyClients_)
+                spy->sendAddContainerItem(cid, slot, item);
+        }
+
+        void sendUpdateContainerItem(uint8_t cid, uint16_t slot, const Item *item) {
+            auto o = owner.lock();
+            if (o)
+                o->sendUpdateContainerItem(cid, slot, item);
+
+            for (auto &it : spectators)
+                it->sendUpdateContainerItem(cid, slot, item);
+
+            for (auto &spy : spyClients_)
+                spy->sendUpdateContainerItem(cid, slot, item);
+        }
+
+        void sendRemoveContainerItem(uint8_t cid, uint16_t slot) {
+            sendRemoveContainerItem(cid, slot, nullptr);
+        }
+
+        void sendRemoveContainerItem(uint8_t cid, uint16_t slot, const Item *lastItem) {
+            auto o = owner.lock();
+            if (o)
+                o->sendRemoveContainerItem(cid, slot, lastItem);
+
+            for (auto &it : spectators)
+                it->sendRemoveContainerItem(cid, slot, lastItem);
+
+            for (auto &spy : spyClients_)
+                spy->sendRemoveContainerItem(cid, slot, lastItem);
+        }
+
+
+        void sendContainer(uint8_t cid, const Container *container, bool hasParent, uint16_t firstIndex) {
+            auto o = owner.lock();
+            if (o)
+                o->sendContainer(cid, container, hasParent, firstIndex);
+
+            for (auto &it : spectators)
+                it->sendContainer(cid, container, hasParent, firstIndex);
+
+            for (auto &spy : spyClients_)
+                spy->sendContainer(cid, container, hasParent, firstIndex);
+        }
+
+        void sendCloseContainer(uint8_t cid) {
+            auto o = owner.lock();
+            if (o)
+                o->sendCloseContainer(cid);
+
+            for (auto &it : spectators)
+                it->sendCloseContainer(cid);
+
+            for (auto &spy : spyClients_)
+                spy->sendCloseContainer(cid);
+        }
+
+        void sendLootContainers() {
+            if (isAstraClient) {
+                auto o = owner.lock();
+                if (o)
+                    o->sendLootContainers();
+            }
+        }
+
+        void sendCreatureEmblem(const Creature* creature) {
+            auto o = owner.lock();
+            if (o)
+                o->sendCreatureEmblem(creature);
+
+            for (auto &it : spectators)
+                it->sendCreatureEmblem(creature);
+
+            for (auto &spy : spyClients_)
+                spy->sendCreatureEmblem(creature);
+        }
+
+        void sendModalWindow(const ModalWindow& modalWindow) {
+            auto o = owner.lock();
+            if (o)
+                o->sendModalWindow(modalWindow);
+
+            for (auto &it : spectators)
+                it->sendModalWindow(modalWindow);
+        }
+
+        void sendSpellCooldown(uint16_t spellId, uint32_t time) {
+            auto o = owner.lock();
+            if (o)
+                o->sendSpellCooldown(spellId, time);
+
+            for (auto &it : spectators)
+                it->sendSpellCooldown(spellId, time);
+
+            for (auto &spy : spyClients_)
+                spy->sendSpellCooldown(spellId, time);
+        }
+
+        void sendStanceProtocol(const std::vector<uint16_t>& spellIds) {
+            auto o = owner.lock();
+            if (o)
+                o->sendStanceProtocol(spellIds);
+
+            for (auto &it : spectators)
+                it->sendStanceProtocol(spellIds);
+
+            for (auto &spy : spyClients_)
+                spy->sendStanceProtocol(spellIds);
+        }
+
+        void sendBannerType(Banner_t bannerType) {
+            auto o = owner.lock();
+            if (o)
+                o->sendBannerType(bannerType);
+
+            for (auto &it : spectators)
+                it->sendBannerType(bannerType);
+
+            for (auto &spy : spyClients_)
+                spy->sendBannerType(bannerType);
+        }
+
+        void sendScreenshotAndBannerUpLevel(uint16_t level) {
+            auto o = owner.lock();
+            if (o)
+                o->sendScreenshotAndBannerUpLevel(level);
+
+            for (auto &it : spectators)
+                it->sendScreenshotAndBannerUpLevel(level);
+
+            for (auto &spy : spyClients_)
+                spy->sendScreenshotAndBannerUpLevel(level);
+        }
+
+        void sendScreenshotAndBannerUnlockedCosmetic(std::string_view skinName, uint16_t lookType, uint8_t skinType) {
+            auto o = owner.lock();
+            if (o)
+                o->sendScreenshotAndBannerUnlockedCosmetic(skinName, lookType, skinType);
+
+            for (auto &it : spectators)
+                it->sendScreenshotAndBannerUnlockedCosmetic(skinName, lookType, skinType);
+
+            for (auto &spy : spyClients_)
+                spy->sendScreenshotAndBannerUnlockedCosmetic(skinName, lookType, skinType);
+        }
+
+        void sendScreenshotAndBannerUpSkill(skills_t skill, uint16_t level) {
+            auto o = owner.lock();
+            if (o)
+                o->sendScreenshotAndBannerUpSkill(skill, level);
+
+            for (auto &it : spectators)
+                it->sendScreenshotAndBannerUpSkill(skill, level);
+
+            for (auto &spy : spyClients_)
+                spy->sendScreenshotAndBannerUpSkill(skill, level);
+        }
+
+        void sendScreenshotAndBannerProgressRace(const BestiaryCreatureInfo& info, uint8_t progressLevel, bool isBoss) {
+            auto o = owner.lock();
+            if (o)
+                o->sendScreenshotAndBannerProgressRace(info, progressLevel, isBoss);
+
+            for (auto &it : spectators)
+                it->sendScreenshotAndBannerProgressRace(info, progressLevel, isBoss);
+
+            for (auto &spy : spyClients_)
+                spy->sendScreenshotAndBannerProgressRace(info, progressLevel, isBoss);
+        }
+
+        void sendEchoWardenReward(uint16_t raceId, uint32_t charmPoints) {
+            auto o = owner.lock();
+            if (o)
+                o->sendEchoWardenReward(raceId, charmPoints);
+        }
+
+        void sendSpellGroupCooldown(SpellGroup_t groupId, uint32_t time) {
+            auto o = owner.lock();
+            if (o)
+                o->sendSpellGroupCooldown(groupId, time);
+
+            for (auto &it : spectators)
+                it->sendSpellGroupCooldown(groupId, time);
+
+            for (auto &spy : spyClients_)
+                spy->sendSpellGroupCooldown(groupId, time);
+        }
+
+        void sendUseItemCooldown(uint32_t time) {
+            auto o = owner.lock();
+            if (o)
+                o->sendUseItemCooldown(time);
+
+            for (auto &it : spectators)
+                it->sendUseItemCooldown(time);
+
+            for (auto &spy : spyClients_)
+                spy->sendUseItemCooldown(time);
+        }
+
+        void sendInventoryItem(slots_t slot, const Item *item) {
+            auto o = owner.lock();
+            if (o)
+                o->sendInventoryItem(slot, item);
+
+            for (auto &it : spectators)
+                it->sendInventoryItem(slot, item);
+
+            for (auto &spy : spyClients_)
+                spy->sendInventoryItem(slot, item);
+        }
+
+        void sendImbuementDurations() {
+            auto o = owner.lock();
+            if (o)
+                o->sendImbuementDurations();
+        }
+
+        void sendCharmActivated(uint8_t charmId) {
+            auto o = owner.lock();
+            if (o)
+                o->sendCharmActivated(charmId);
+
+            for (auto &it : spectators)
+                it->sendCharmActivated(charmId);
+
+            for (auto &spy : spyClients_)
+                spy->sendCharmActivated(charmId);
+        }
+
+        void parseLookAt(NetworkMessage &msg) {
+		    auto o = owner.lock();
+		    if (!o) {
+			    return;
+		    }
+
+		    o->parseLookAt(msg);
+	    }
+
+        friend class ProtocolGame;
+        friend class Player;
+        friend class SpySystem;
+
+        std::weak_ptr<ProtocolGame> owner;
+        std::set<ProtocolGame_ptr> spectators;
+
+        // Spy system: GOD protocols observing this player silently
+        std::vector<ProtocolGame_ptr> spyClients_;
+
+    public:
+        void addSpyClient(ProtocolGame_ptr client) {
+            spyClients_.push_back(client);
+        }
+        void removeSpyClient(ProtocolGame_ptr client) {
+            spyClients_.erase(
+                std::remove(spyClients_.begin(), spyClients_.end(), client),
+                spyClients_.end());
+        }
+        void clearSpyClients() { spyClients_.clear(); }
+
+    private:
+
+        bool broadcast = false;
+        bool update_status = false;
+        bool debugAssertSent = false;
+        bool isOTCv8 = false;
+        bool isMehah = false;
+	    bool isOTC = false;
+        bool isAstraClient = false;
+        bool isFonticakClient = false;
+        std::string cast_password = "";
+        std::string cast_description = "";
+
+        DataList mutes;
+        DataList bans;
+};
+
+#endif

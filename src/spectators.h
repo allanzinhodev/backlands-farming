@@ -1,0 +1,122 @@
+// Copyright 2023 The Forgotten Server Authors. All rights reserved.
+// Use of this source code is governed by the GPL-2.0 License that can be found in the LICENSE file.
+
+#ifndef FS_SPECTATORS_H
+#define FS_SPECTATORS_H
+
+#include <algorithm>
+#include <cassert>
+#include <functional>
+#include <memory>
+#include <span>
+#include <vector>
+
+class Creature;
+class Player;
+
+class SpectatorVec
+{
+	using Vec = std::vector<std::shared_ptr<Creature>>;
+	using Iterator = Vec::iterator;
+	using ConstIterator = Vec::const_iterator;
+
+public:
+	SpectatorVec() = default;
+
+	void addSpectators(const SpectatorVec& spectators)
+	{
+		if (spectators.vec.empty() || &spectators == this) {
+			return;
+		}
+
+		reserveOnFirstInsertion();
+		vec.reserve(vec.size() + spectators.vec.size());
+		vec.insert(vec.end(), spectators.vec.begin(), spectators.vec.end());
+
+		vec.erase(std::remove_if(vec.begin(), vec.end(),
+			[](const auto& spectator) { return !spectator; }), vec.end());
+
+		// shared_ptr's default comparisons are .get()-based under a strict total
+		// order (C++20 [util.smartptr.shared.cmp]), so no custom comparators needed.
+		std::sort(vec.begin(), vec.end());
+		vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
+
+		partitioned_ = false;
+	}
+
+	void erase(Creature* spectator)
+	{
+		auto it = std::find_if(vec.begin(), vec.end(),
+			[spectator](const auto& sp) { return sp.get() == spectator; });
+		if (it == vec.end()) {
+			return;
+		}
+		std::iter_swap(it, vec.end() - 1);
+		vec.pop_back();
+		partitioned_ = false;
+	}
+
+	void partitionByType();
+	void filterPlayers(std::function<bool(const Player*)> pred);
+
+	std::span<std::shared_ptr<Creature>> players() {
+		assert(partitioned_);
+		return {vec.data(), playerEnd_};
+	}
+	std::span<std::shared_ptr<Creature>> monsters() {
+		assert(partitioned_);
+		return {playerEnd_ == 0 ? vec.data() : vec.data() + playerEnd_, monsterEnd_ - playerEnd_};
+	}
+	std::span<std::shared_ptr<Creature>> npcs() {
+		assert(partitioned_);
+		return {monsterEnd_ == 0 ? vec.data() : vec.data() + monsterEnd_, vec.size() - monsterEnd_};
+	}
+
+	std::span<const std::shared_ptr<Creature>> players() const {
+		assert(partitioned_);
+		return {vec.data(), playerEnd_};
+	}
+	std::span<const std::shared_ptr<Creature>> monsters() const {
+		assert(partitioned_);
+		return {playerEnd_ == 0 ? vec.data() : vec.data() + playerEnd_, monsterEnd_ - playerEnd_};
+	}
+	std::span<const std::shared_ptr<Creature>> npcs() const {
+		assert(partitioned_);
+		return {monsterEnd_ == 0 ? vec.data() : vec.data() + monsterEnd_, vec.size() - monsterEnd_};
+	}
+
+	size_t size() const { return vec.size(); }
+	bool empty() const { return vec.empty(); }
+	std::shared_ptr<Creature>& operator[](size_t index) { return vec[index]; }
+	const std::shared_ptr<Creature>& operator[](size_t index) const { return vec[index]; }
+	Iterator begin() { return vec.begin(); }
+	ConstIterator begin() const { return vec.begin(); }
+	Iterator end() { return vec.end(); }
+	ConstIterator end() const { return vec.end(); }
+	void emplace_back(std::shared_ptr<Creature> c)
+	{
+		if (c) {
+			reserveOnFirstInsertion();
+			vec.emplace_back(std::move(c));
+			partitioned_ = false;
+		}
+	}
+	void emplaceNull() { reserveOnFirstInsertion(); vec.emplace_back(); partitioned_ = false; }
+
+private:
+	// Empty spectator queries do not need storage. Keep the existing initial
+	// capacity for the first actual entry, including explicit null entries.
+	void reserveOnFirstInsertion()
+	{
+		if (vec.capacity() == 0) {
+			vec.reserve(32);
+		}
+	}
+
+	Vec vec;
+	size_t playerEnd_ = 0;
+	size_t monsterEnd_ = 0;
+	bool partitioned_ = false;
+};
+
+#endif // FS_SPECTATORS_H

@@ -1,0 +1,22 @@
+local spell = Spell("instant")
+function spell.onCastSpell(creature, variant)
+	return creature:conjureItem(3277, 7367, 1, CONST_ME_MAGIC_GREEN)
+end
+
+
+spell:group("support")
+spell:id(169)
+spell:name("Enchant Spear")
+spell:castSound(SOUND_EFFECT_TYPE_SPELL_ENCHANT_SPEAR)
+spell:words("exeta con")
+spell:level(45)
+spell:mana(350)
+spell:soul(3)
+spell:isPremium(true)
+spell:isSelfTarget(true)
+spell:cooldown(2 * 1000)
+spell:groupCooldown(2 * 1000)
+spell:needLearn(false)
+spell:isAggressive(false)
+spell:vocation("paladin", "royal paladin")
+spell:register()

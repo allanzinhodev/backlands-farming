@@ -1,0 +1,479 @@
+// Copyright 2023 The Forgotten Server Authors. All rights reserved.
+// Use of this source code is governed by the GPL-2.0 License that can be found in the LICENSE file.
+
+#include "otpch.h"
+
+#include "connection.h"
+
+#include "configmanager.h"
+#include "outputmessage.h"
+#include "performance_metrics.h"
+#include "protocol.h"
+#include "scheduler.h"
+#include "server.h"
+#include "logger.h"
+#include <fmt/format.h>
+
+Connection_ptr ConnectionManager::createConnection(asio::io_context& io_context,
+                                                   ConstServicePort_ptr servicePort)
+{
+	std::scoped_lock lockClass(connectionManagerLock);
+
+	const int64_t maximumConnections = getInteger(ConfigManager::MAX_CONNECTIONS);
+	if (maximumConnections > 0 && connections.size() >= static_cast<size_t>(maximumConnections)) {
+		return nullptr;
+	}
+
+	auto connection = std::make_shared<Connection>(io_context, servicePort);
+	connections.insert(connection);
+	g_performanceMetrics.recordNetworkConnectionCount(connections.size());
+	return connection;
+}
+
+void ConnectionManager::releaseConnection(const Connection_ptr& connection)
+{
+	std::scoped_lock lockClass(connectionManagerLock);
+
+	if (connections.erase(connection) == 0) {
+		return;
+	}
+
+	const uint32_t ip = connection->trackedIp;
+	if (ip != 0) {
+		auto it = ipConnectionCount.find(ip);
+		if (it != ipConnectionCount.end()) {
+			if (it->second <= 1) {
+				ipConnectionCount.erase(it);
+			} else {
+				it->second--;
+			}
+		}
+	}
+
+	g_performanceMetrics.recordNetworkConnectionCount(connections.size());
+}
+
+// Both bulk operations below touch per-connection state, which belongs to
+// connectionLock. Connection::closeLocked() already takes connectionLock and
+// then connectionManagerLock (via releaseConnection), so acquiring them in the
+// opposite order here would deadlock. Snapshot the set under the manager lock,
+// release it, then lock each connection on its own — the two locks are never
+// held at the same time.
+void ConnectionManager::closeAll()
+{
+	std::vector<Connection_ptr> openConnections;
+	{
+		std::scoped_lock lockClass(connectionManagerLock);
+		openConnections.assign(connections.begin(), connections.end());
+		connections.clear();
+		ipConnectionCount.clear();
+		g_performanceMetrics.recordNetworkConnectionCount(0);
+	}
+
+	for (const auto& connection : openConnections) {
+		std::scoped_lock lock(connection->connectionLock);
+		connection->closeSocket();
+	}
+}
+
+void ConnectionManager::releaseAllProtocols()
+{
+	std::vector<Connection_ptr> openConnections;
+	{
+		std::scoped_lock lockClass(connectionManagerLock);
+		openConnections.assign(connections.begin(), connections.end());
+	}
+
+	for (const auto& connection : openConnections) {
+		std::scoped_lock lock(connection->connectionLock);
+		if (connection->protocol) {
+			connection->protocol->release();
+			connection->protocol.reset();
+		}
+	}
+}
+
+size_t ConnectionManager::getConnectionCount() const
+{
+	std::scoped_lock lockClass(connectionManagerLock);
+	return connections.size();
+}
+
+uint32_t ConnectionManager::getConnectionCountForIP(uint32_t ip) const
+{
+	std::scoped_lock lockClass(connectionManagerLock);
+	const auto it = ipConnectionCount.find(ip);
+	return it != ipConnectionCount.end() ? it->second : 0;
+}
+
+bool ConnectionManager::trackIPConnection(const Connection_ptr& connection, uint32_t ip, uint32_t& currentCount)
+{
+	if (!connection || ip == 0) {
+		currentCount = 0;
+		return false;
+	}
+
+	std::scoped_lock lockClass(connectionManagerLock);
+	if (!connections.contains(connection) || connection->trackedIp != 0) {
+		currentCount = 0;
+		return false;
+	}
+
+	uint32_t& count = ipConnectionCount[ip];
+	currentCount = count;
+	const int64_t configuredLimit = getInteger(ConfigManager::MAX_CONNECTIONS_PER_IP);
+	if (configuredLimit > 0 && static_cast<uint64_t>(count) >= static_cast<uint64_t>(configuredLimit)) {
+		return false;
+	}
+
+	connection->trackedIp = ip;
+	currentCount = ++count;
+	return true;
+}
+
+// Connection
+
+void Connection::close(bool force)
+{
+	std::scoped_lock lockClass(connectionLock);
+	closeLocked(force);
+}
+
+void Connection::closeLocked(bool force)
+{
+	// Must be called with connectionLock held.
+	if (closed) {
+		return;
+	}
+	closed = true;
+
+	if (protocol) {
+		g_dispatcher.addTask([protocol = protocol]() { protocol->release(); });
+	}
+
+	if (messageQueue.empty() || force) {
+		closeSocket();
+	} else {
+		// will be closed by the destructor or onWriteOperation
+	}
+
+	ConnectionManager::getInstance().releaseConnection(shared_from_this());
+}
+
+void Connection::closeSocket()
+{
+	if (socket.is_open()) {
+		try {
+			readTimer.cancel();
+			writeTimer.cancel();
+			asio::error_code error;
+			socket.shutdown(asio::ip::tcp::socket::shutdown_both, error);
+			socket.close(error);
+		} catch (std::system_error& e) {
+			LOG_NETWORK(fmt::format("Error - Connection::closeSocket: {}", e.what()));
+		}
+	}
+}
+
+Connection::~Connection() { closeSocket(); }
+
+void Connection::accept(Protocol_ptr protocol)
+{
+	// Every other read of this->protocol is under connectionLock; releaseAllProtocols()
+	// can reset it from another thread at any point. Publishing it unlocked here was
+	// the one gap in that discipline.
+	{
+		std::scoped_lock lockClass(connectionLock);
+		this->protocol = protocol;
+	}
+	g_dispatcher.addTask([protocol]() { protocol->onConnect(); });
+
+	accept();
+}
+
+void Connection::accept()
+{
+	std::scoped_lock lockClass(connectionLock);
+	try {
+		readTimer.expires_after(std::chrono::seconds(CONNECTION_READ_TIMEOUT));
+		readTimer.async_wait(
+		    [thisPtr = std::weak_ptr<Connection>(shared_from_this())](const asio::error_code& error) {
+			    Connection::handleTimeout(thisPtr, error);
+		    });
+
+		// Read size of the first packet
+		asio::async_read(
+		    socket, asio::buffer(msg.getBuffer(), NetworkMessage::HEADER_LENGTH),
+		    [thisPtr = shared_from_this()](const asio::error_code& error, auto /*bytes_transferred*/) {
+			    thisPtr->parseHeader(error);
+		    });
+	} catch (std::system_error& e) {
+		LOG_NETWORK(fmt::format("Error - Connection::accept: {}", e.what()));
+		closeLocked(FORCE_CLOSE);
+	}
+}
+
+void Connection::parseHeader(const asio::error_code& error)
+{
+	std::scoped_lock lockClass(connectionLock);
+	readTimer.cancel();
+
+	if (error) {
+		closeLocked(FORCE_CLOSE);
+		return;
+	} else if (closed) {
+		return;
+	}
+
+	uint32_t timePassed = std::max<uint32_t>(1, (time(nullptr) - timeConnected) + 1);
+	if ((++packetsSent / timePassed) > getInteger(ConfigManager::MAX_PACKETS_PER_SECOND)) {
+		LOG_NETWORK(fmt::format("{} disconnected for exceeding packet per second limit.", convertIPToString(getIPLocked())));
+		closeLocked(false);
+		return;
+	}
+
+	if (timePassed > 2) {
+		timeConnected = time(nullptr);
+		packetsSent = 0;
+	}
+
+	uint16_t size = msg.getLengthHeader();
+	if (size == 0 || size >= NETWORKMESSAGE_MAXSIZE - 16) {
+		closeLocked(FORCE_CLOSE);
+		return;
+	}
+
+	try {
+		readTimer.expires_after(std::chrono::seconds(CONNECTION_READ_TIMEOUT));
+		readTimer.async_wait(
+		    [thisPtr = std::weak_ptr<Connection>(shared_from_this())](const asio::error_code& error) {
+			    Connection::handleTimeout(thisPtr, error);
+		    });
+
+		// Read packet content
+		msg.setLength(size + NetworkMessage::HEADER_LENGTH);
+		asio::async_read(
+		    socket, asio::buffer(msg.getBodyBuffer(), size),
+		    [thisPtr = shared_from_this()](const asio::error_code& error, auto /*bytes_transferred*/) {
+			    thisPtr->parsePacket(error);
+		    });
+	} catch (std::system_error& e) {
+		LOG_NETWORK(fmt::format("Error - Connection::parseHeader: {}", e.what()));
+		closeLocked(FORCE_CLOSE);
+	}
+}
+
+void Connection::parsePacket(const asio::error_code& error)
+{
+	std::scoped_lock lockClass(connectionLock);
+	readTimer.cancel();
+
+	if (error) {
+		closeLocked(FORCE_CLOSE);
+		return;
+	} else if (closed) {
+		return;
+	}
+
+	// Check packet checksum
+	uint32_t checksum;
+	int32_t len = msg.getLength() - msg.getBufferPosition() - NetworkMessage::CHECKSUM_LENGTH;
+	if (len > 0) {
+		checksum = adlerChecksum(msg.getBuffer() + msg.getBufferPosition() + NetworkMessage::CHECKSUM_LENGTH, len);
+	} else {
+		checksum = 0;
+	}
+
+	uint32_t recvChecksum = msg.get<uint32_t>();
+	if (recvChecksum != checksum) {
+		// it might not have been the checksum, step back
+		msg.skipBytes(-NetworkMessage::CHECKSUM_LENGTH);
+	}
+
+	if (!receivedFirst) {
+		// First message received
+		receivedFirst = true;
+
+		if (!protocol) {
+			// Game protocol has already been created at this point
+			protocol = service_port->make_protocol(recvChecksum == checksum, msg, shared_from_this());
+			if (!protocol) {
+				closeLocked(FORCE_CLOSE);
+				return;
+			}
+		} else {
+			msg.skipBytes(1); // Skip protocol ID
+		}
+
+		protocol->onRecvFirstMessage(msg);
+	} else {
+		protocol->onRecvMessage(msg); // Send the packet to the current protocol
+	}
+
+	try {
+		readTimer.expires_after(std::chrono::seconds(CONNECTION_READ_TIMEOUT));
+		readTimer.async_wait(
+		    [thisPtr = std::weak_ptr<Connection>(shared_from_this())](const asio::error_code& error) {
+			    Connection::handleTimeout(thisPtr, error);
+		    });
+
+		// Wait to the next packet
+		asio::async_read(
+		    socket, asio::buffer(msg.getBuffer(), NetworkMessage::HEADER_LENGTH),
+		    [thisPtr = shared_from_this()](const asio::error_code& error, auto /*bytes_transferred*/) {
+			    thisPtr->parseHeader(error);
+		    });
+	} catch (std::system_error& e) {
+		LOG_NETWORK(fmt::format("Error - Connection::parsePacket: {}", e.what()));
+		closeLocked(FORCE_CLOSE);
+	}
+}
+
+void Connection::send(const OutputMessage_ptr& msg)
+{
+	std::scoped_lock lockClass(connectionLock);
+	if (closed) {
+		return;
+	}
+
+	if (messageQueue.size() >= MAX_PENDING_WRITE_MESSAGES) {
+		LOG_NETWORK(fmt::format("{} disconnected for exceeding the pending write limit ({} messages).",
+		                        convertIPToString(getIPLocked()), MAX_PENDING_WRITE_MESSAGES));
+		// Deliberately does NOT clear messageQueue. The front message may be the
+		// buffer a pending asio::async_write() is reading from right now; dropping
+		// the queue's reference here could free it under Asio. closeLocked() cancels
+		// the socket, which completes that write with operation_aborted, and
+		// onWriteOperation() then drains the queue from the completion side where
+		// no write is in flight. See the ownership note in internalSend().
+		closeLocked(FORCE_CLOSE);
+		return;
+	}
+
+	bool noPendingWrite = messageQueue.empty();
+	messageQueue.emplace_back(msg);
+	if (noPendingWrite) {
+		try {
+			asio::post(socket.get_executor(),
+			                  [thisPtr = shared_from_this(), msg] { thisPtr->internalSend(msg); });
+		} catch (const std::system_error& e) {
+			LOG_NETWORK(fmt::format("Error - Connection::send: {}", e.what()));
+			// Same rule as above: never drop queued messages from the producer side.
+			closeLocked(FORCE_CLOSE);
+		}
+	}
+}
+
+// Takes the message by value on purpose. Callers pass messageQueue.front(), so a
+// reference parameter would alias a deque element that this function's own error
+// paths can erase, leaving msg dangling before async_write() reads it.
+void Connection::internalSend(OutputMessage_ptr msg)
+{
+	std::scoped_lock lockClass(connectionLock);
+
+	// releaseAllProtocols() clears protocol during shutdown, and this runs on the
+	// strand, so the pointer can legitimately be gone by the time a queued send
+	// gets here. Nothing can serialise the message without a protocol; tear the
+	// connection down instead of dereferencing null.
+	if (!protocol) {
+		closeLocked(FORCE_CLOSE);
+		return;
+	}
+
+	protocol->onSendMessage(msg);
+	try {
+		writeTimer.expires_after(std::chrono::seconds(CONNECTION_WRITE_TIMEOUT));
+		writeTimer.async_wait(
+		    [thisPtr = std::weak_ptr<Connection>(shared_from_this())](const asio::error_code& error) {
+			    Connection::handleTimeout(thisPtr, error);
+		    });
+
+		// The completion handler captures msg so the OutputMessage — and the inline
+		// NETWORKMESSAGE_MAXSIZE buffer handed to asio::buffer() below — stays alive
+		// for the whole write no matter what happens to messageQueue meanwhile. The
+		// queue is a scheduling structure, not the owner of the in-flight buffer.
+		asio::async_write(
+		    socket, asio::buffer(msg->getOutputBuffer(), msg->getLength()),
+		    [thisPtr = shared_from_this(), msg](const asio::error_code& error, auto /*bytes_transferred*/) {
+			    thisPtr->onWriteOperation(error);
+		    });
+	} catch (std::system_error& e) {
+		LOG_NETWORK(fmt::format("Error - Connection::internalSend: {}", e.what()));
+		closeLocked(FORCE_CLOSE);
+	}
+}
+
+uint32_t Connection::getIP()
+{
+	std::scoped_lock lockClass(connectionLock);
+	return getIPLocked();
+}
+
+uint32_t Connection::getIPLocked()
+{
+	// Must be called with connectionLock held, or from a safe context.
+	if (cachedPeerIp != 0) {
+		return cachedPeerIp;
+	}
+
+	asio::error_code error;
+	const asio::ip::tcp::endpoint endpoint = socket.remote_endpoint(error);
+	if (error) {
+		return 0;
+	}
+
+	cachedPeerIp = htonl(endpoint.address().to_v4().to_uint());
+	return cachedPeerIp;
+}
+
+void Connection::onWriteOperation(const asio::error_code& error)
+{
+	std::scoped_lock lockClass(connectionLock);
+	writeTimer.cancel();
+
+	// This completion owns the message it wrote, so the queue is allowed to be empty
+	// here — a close path may have drained it while the write was still in flight.
+	// pop_front() on an empty deque is undefined behaviour, so check first.
+	if (!messageQueue.empty()) {
+		messageQueue.pop_front();
+	}
+
+	// Clearing the queue is only safe from this side: reaching onWriteOperation()
+	// means the write that owned the front message has finished, so no buffer handed
+	// to Asio is still in use. Producer-side paths must never do this.
+	if (error) {
+		messageQueue.clear();
+		closeLocked(FORCE_CLOSE);
+		return;
+	}
+
+	if (!messageQueue.empty()) {
+		if (socket.is_open()) {
+			// Keeps the graceful-close drain working: closeLocked(false) leaves the
+			// socket open so queued messages still flush.
+			internalSend(messageQueue.front());
+		} else {
+			// A forced close cancelled the socket while this write was pending.
+			// Nothing left can be flushed, and no write is in flight, so release the
+			// remainder and finish the teardown.
+			messageQueue.clear();
+			closeSocket();
+		}
+		return;
+	}
+
+	if (closed) {
+		closeSocket();
+	}
+}
+
+void Connection::handleTimeout(ConnectionWeak_ptr connectionWeak, const asio::error_code& error)
+{
+	if (error == asio::error::operation_aborted) {
+		// The timer has been manually canceled
+		return;
+	}
+
+	if (auto connection = connectionWeak.lock()) {
+		connection->close(FORCE_CLOSE);
+	}
+}

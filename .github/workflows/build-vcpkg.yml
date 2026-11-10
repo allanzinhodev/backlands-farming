@@ -1,0 +1,249 @@
+name: Build with vcpkg
+
+concurrency:
+  group: build-vcpkg-${{ github.workflow_ref }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/build-vcpkg.yml
+      - cmake/**
+      - src/**
+      - CMakeLists.txt
+      - CMakePresets.json
+      - vcpkg.json
+      - vcpkg-configuration.json
+      - vcpkg-overlays/**
+      - tools/*.cmake
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/build-vcpkg.yml
+      - cmake/**
+      - src/**
+      - CMakeLists.txt
+      - CMakePresets.json
+      - vcpkg.json
+      - vcpkg-configuration.json
+      - vcpkg-overlays/**
+      - tools/*.cmake
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    name: Windows
+    runs-on: windows-2022
+    env:
+      VCPKG_ROOT: D:\vcpkg
+      VCPKG_BUILD_TYPE: release
+      VCPKG_INSTALLED_DIR: D:\vi
+      VCPKG_DEFAULT_BINARY_CACHE: D:\vcache
+      VCPKG_BINARY_SOURCES: clear;files,D:\vcache,readwrite
+      SCCACHE_GHA_ENABLED: 'false'
+      SCCACHE_CACHE_SIZE: 2G
+      SCCACHE_BASEDIRS: ${{ github.workspace }}
+      SCCACHE_IGNORE_SERVER_IO_ERROR: '1'
+      SCCACHE_IDLE_TIMEOUT: '0'
+      SCCACHE_LOG: warn
+      SCCACHE_ERROR_LOG: ${{ github.workspace }}/build/diagnostics/sccache.log
+      VCPKG_DOWNLOADS: D:/vdownloads
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read vcpkg baseline and prepare cache
+        id: vcpkg-baseline
+        run: |
+          $env:SCCACHE_DIR = Join-Path $env:RUNNER_TEMP 'sccache'
+          "SCCACHE_DIR=$env:SCCACHE_DIR" >> $env:GITHUB_ENV
+          & ./cmake/ci/ReadBuildContext.ps1
+
+      - name: Restore dependency cache
+        id: dependency-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+            ${{ env.VCPKG_DOWNLOADS }}
+          key: vcpkg-windows-x64-${{ steps.vcpkg-baseline.outputs.toolset }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-overlays/**') }}
+          restore-keys: |
+            vcpkg-windows-x64-${{ steps.vcpkg-baseline.outputs.toolset }}-
+            vcpkg-windows-x64-
+            vcpkg-windows-
+
+      - name: Restore compiler objects
+        id: compiler-objects
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: compiler-windows-x64-sccache16-${{ steps.vcpkg-baseline.outputs.toolset }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: compiler-windows-x64-sccache16-${{ steps.vcpkg-baseline.outputs.toolset }}-
+
+      - name: Install verified compiler cache
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        continue-on-error: true
+        with:
+          script: |
+            const childEnv = { ...process.env };
+            delete childEnv.ACTIONS_RUNTIME_TOKEN;
+            delete childEnv.ACTIONS_RESULTS_URL;
+            delete childEnv['INPUT_GITHUB-TOKEN'];
+            await exec.exec('pwsh', ['-NoLogo', '-NoProfile', '-File', 'cmake/ci/SetupCompilerCache.ps1'], { env: childEnv });
+        id: compiler-setup
+
+      - name: Checkout pinned vcpkg source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ steps.vcpkg-baseline.outputs.commit }}
+          path: vcpkg
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Move pinned vcpkg to short path
+        run: |
+          # actions/checkout requires a path inside GITHUB_WORKSPACE. Relocate
+          # before bootstrap so buildtrees, packages and tools use the short root.
+          $workspacePath = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).Path
+          $checkoutPath = [IO.Path]::GetFullPath((Join-Path $workspacePath 'vcpkg'))
+          $vcpkgPath = [IO.Path]::GetFullPath($env:VCPKG_ROOT)
+          if (-not $checkoutPath.StartsWith("$workspacePath\", [StringComparison]::OrdinalIgnoreCase) -or $vcpkgPath -ne 'D:\vcpkg') {
+            throw 'Unexpected vcpkg relocation paths.'
+          }
+          if (Test-Path -LiteralPath $vcpkgPath) {
+            throw "Refusing to overwrite existing vcpkg directory: $vcpkgPath"
+          }
+          Move-Item -LiteralPath $checkoutPath -Destination $vcpkgPath
+          $actualCommit = & git -C $vcpkgPath rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $actualCommit -ne '${{ steps.vcpkg-baseline.outputs.commit }}') {
+            throw 'Relocated vcpkg does not match the pinned baseline.'
+          }
+
+      - name: Bootstrap vcpkg
+        run: |
+          & "$env:VCPKG_ROOT/bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify clean source metadata
+        run: |
+          $status = git status --porcelain
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Set-Content build/diagnostics/worktree-status.txt -Value ($status -join [Environment]::NewLine) -NoNewline
+          if ($status) { throw 'Generated CI files dirtied the source checkout; see worktree-status.txt.' }
+
+      - name: Configure MSVC and build with CMake
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $visualStudioPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($visualStudioPath)) {
+            throw 'An x64 MSVC installation was not found on the runner.'
+          }
+          Import-Module (Join-Path $visualStudioPath 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $visualStudioPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+
+          cmake --list-presets=all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $configureArgs = @(
+            '--preset', 'vcpkg',
+            '-G', 'Ninja',
+            '-DCMAKE_BUILD_TYPE=Release',
+            '-DBUILD_TESTING=ON',
+            '-DENABLE_TEST_LTO=OFF',
+            '-DCMAKE_C_COMPILER=cl',
+            '-DCMAKE_CXX_COMPILER=cl',
+            '-DVCPKG_TARGET_TRIPLET=x64-windows-static',
+            "-DVCPKG_INSTALLED_DIR=$env:VCPKG_INSTALLED_DIR",
+            '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded'
+          )
+          $launcher = if (Get-Command sccache -ErrorAction SilentlyContinue) { 'sccache' } else { '' }
+          $configureArgs += "-DCMAKE_CXX_COMPILER_LAUNCHER=$launcher"
+          & ./cmake/ci/InvokeBuildStage.ps1 -Name configure -Executable cmake -Arguments $configureArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          'configured=true' >> $env:GITHUB_OUTPUT
+          & ./cmake/ci/InvokeBuildStage.ps1 -Name build -Executable cmake -Arguments @('--build', '--preset', 'vcpkg', '--parallel', '2')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        id: compile
+
+      - name: Save dependency cache
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: always() && steps.compile.outputs.configured == 'true' && steps.dependency-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+            ${{ env.VCPKG_DOWNLOADS }}
+          key: vcpkg-windows-x64-${{ steps.vcpkg-baseline.outputs.toolset }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-overlays/**') }}
+
+      - name: Run tests
+        run: |
+          & ./cmake/ci/InvokeBuildStage.ps1 -Name test -Executable ctest -Arguments @('--test-dir', 'build', '--output-on-failure', '--no-tests=error', '--timeout', '120', '--output-junit', "$env:GITHUB_WORKSPACE/build/diagnostics/tests.xml")
+          if (-not (Test-Path build/diagnostics/tests.xml)) { throw 'JUnit report missing.' }
+
+      - name: Validate-runtime-package
+        shell: pwsh
+        run: |
+          $commands = @'
+          powershell -NoProfile -ExecutionPolicy Bypass -File cmake\ci\ValidateWindowsBinary.ps1 -Executable build\tfs.exe
+          if errorlevel 1 exit /b 1
+          '@
+          & ./cmake/ci/InvokeBuildStage.ps1 -Name 'Validate-runtime-package' -CmdScript $commands
+
+      - name: Record compiler cache statistics
+        shell: pwsh
+        run: |
+          if (Get-Command sccache -ErrorAction SilentlyContinue) {
+            try {
+              & ./cmake/ci/InvokeBuildStage.ps1 -Name compiler-cache -Executable sccache -Arguments @('--show-stats')
+            } finally {
+              sccache --stop-server
+            }
+          }
+        if: always()
+        continue-on-error: true
+
+      - name: Save compiler objects
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        if: '!cancelled() && steps.compiler-setup.outcome == ''success'''
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: compiler-windows-x64-sccache16-${{ steps.vcpkg-baseline.outputs.toolset }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload build diagnostics
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: windows-diagnostics-${{ github.sha }}
+          path: |
+            build/diagnostics/
+            build/CMakeCache.txt
+            build/build.ninja
+            build/CMakeFiles/CMakeConfigureLog.yaml
+            build/Testing/Temporary/
+            build/vcpkg-manifest-install.log
+            ${{ env.VCPKG_ROOT }}/buildtrees/**/*.log
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload artifact binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tfs-windows-${{ github.sha }}
+          path: |
+            build/tfs.exe
+            build/*.dll
+          if-no-files-found: error
+          retention-days: 14
+    timeout-minutes: 120
