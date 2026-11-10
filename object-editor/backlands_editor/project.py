@@ -9,10 +9,6 @@ import copy
 import json
 import os
 from pathlib import Path
-import shutil
-import tempfile
-from datetime import datetime
-import uuid
 
 from PIL import Image, PngImagePlugin
 
@@ -20,6 +16,8 @@ from .formats import (
     MAX_SPRITES, DatFile, FormatOptions, SpriteFile, Thing,
     read_dat, read_otfi, read_spr, write_dat, write_otfi, write_spr,
 )
+from .server_project import MANIFEST_NAME, ServerFiles
+from .transactions import atomic_write_files
 
 SPRITE_SIZE = 16
 MAX_IMAGE_PIXELS = 16_777_216
@@ -113,6 +111,7 @@ class Project:
         self.dat_name = dat_name
         self.spr_name = spr_name
         self.otfi_name = otfi_name
+        self.server_files = ServerFiles()
 
     @classmethod
     def new(cls, options: FormatOptions | None = None) -> "Project":
@@ -160,6 +159,7 @@ class Project:
             copy.deepcopy(options), directory, dat_name, spr_name, otfi_name,
         )
         project.validate()
+        project.server_files = ServerFiles.discover(directory)
         return project
 
     def validate(self) -> None:
@@ -212,62 +212,22 @@ class Project:
         # Parse the complete pair before staging or touching existing files.
         read_dat(payloads[0], self.options)
         read_spr(payloads[1], self.options)
-        destination.mkdir(parents=True, exist_ok=True)
-        destination = destination.resolve()
-        stage = Path(tempfile.mkdtemp(prefix=".backlands-stage-", dir=destination))
-        backups: dict[Path, Path | None] = {}
-        committed: list[Path] = []
-        try:
-            staged = []
-            for index, data in enumerate(payloads):
-                temporary = stage / str(index)
-                with temporary.open("wb") as stream:
-                    stream.write(data)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                staged.append(temporary)
-            backup_directory = destination / ".backups" / (datetime.now().strftime("%Y%m%d-%H%M%S-%f") + "-" + uuid.uuid4().hex[:8])
-            try:
-                backup_directory.resolve().relative_to(destination)
-            except ValueError as exc:
-                raise ValueError("A pasta .backups aponta para fora do projeto.") from exc
+        linked = self.server_files
+        if self.directory is not None and destination != self.directory and linked.configured:
+            linked = linked.for_export(destination)
+        entries = list(zip(targets, payloads))
+        manifest = linked.manifest_bytes(destination)
+        if manifest is not None:
+            entries.append((_safe_path(destination, MANIFEST_NAME), manifest))
+        entries.extend(linked.pending_writes())
+        def preflight():
             for name, target in zip(names, targets):
-                # Recheck links after creating the destination and before writes.
                 if _safe_path(destination, name) != target:
                     raise ValueError("O caminho do projeto mudou durante o salvamento.")
-                if target.exists():
-                    if not target.is_file():
-                        raise ValueError(f"O destino não é um arquivo: {target}.")
-                    backup = backup_directory / target.relative_to(destination)
-                    backup.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(target, backup)
-                    backups[target] = backup
-                else:
-                    backups[target] = None
-            for temporary, target in zip(staged, targets):
-                target.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(temporary, target)
-                committed.append(target)
-        except Exception as error:
-            failures = []
-            for target in reversed(committed):
-                try:
-                    backup = backups[target]
-                    if backup is None:
-                        target.unlink(missing_ok=True)
-                    else:
-                        restore = stage / ("restore-" + uuid.uuid4().hex)
-                        shutil.copy2(backup, restore)
-                        os.replace(restore, target)
-                except OSError as restore_error:
-                    failures.append(f"{target}: {restore_error}")
-            if failures:
-                raise OSError("Falha ao salvar e restaurar arquivos. Recupere os originais em .backups. " + "; ".join(failures)) from error
-            raise
-        finally:
-            # Only remove the temporary directory allocated directly under this project.
-            if stage.parent.resolve() == destination and stage.name.startswith(".backlands-stage-"):
-                shutil.rmtree(stage, ignore_errors=True)
+            linked.check_conflicts()
+        atomic_write_files(entries, destination, preflight=preflight)
+        linked.mark_saved()
+        self.server_files = linked
         self.directory = destination
         return destination
 

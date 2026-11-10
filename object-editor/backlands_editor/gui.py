@@ -21,6 +21,7 @@ from .animation_ui import AnimationPanel
 from .formats import Attribute, FLAG_SPECS, FormatOptions, FrameGroup
 from .project import Project
 from .settings import remember_project, startup_project
+from .server_ui import ServerPanel
 from .widgets import PixelEditor, checker
 
 CATEGORIES = ("Itens", "Criaturas", "Efeitos", "Projéteis")
@@ -187,6 +188,8 @@ class Editor:
         self.pixel = PixelEditor(notebook, self.pixel_changed)
         notebook.add(self.pixel, text="Editor de pixels 16×16")
         self.center_notebook = notebook
+        self.server_panel = ServerPanel(notebook, self)
+        notebook.add(self.server_panel, text="Itens do servidor")
         controls = ttk.Frame(preview)
         controls.pack(fill="x")
         ttk.Label(controls, text="Grupo").pack(side="left")
@@ -406,6 +409,7 @@ class Editor:
             self.root.configure(cursor="")
         self.dirty = False
         self.remember_current_project()
+        self.server_panel.refresh()
         self.update_title()
         self.status.set(f"Salvo em {directory} · originais preservados em .backups quando substituídos")
         return True
@@ -414,14 +418,15 @@ class Editor:
         self.pixel.finish()
         if not self.apply_properties():
             return False
-        path = filedialog.askdirectory(parent=self.root, title="Salvar DAT + SPR + OTFI na pasta")
+        path = filedialog.askdirectory(parent=self.root, title="Salvar projeto em outra pasta (inclui cópia dos itens do servidor)")
         if not path:
             return False
         self.project.save(Path(path))
         self.dirty = False
         self.remember_current_project()
+        self.server_panel.refresh()
         self.update_title()
-        self.status.set(f"DAT + SPR + OTFI salvos em {path}")
+        self.status.set(f"Projeto salvo em {path} · XML/OTB associados copiados para server-items na exportação")
         return True
 
     def close(self):
@@ -437,8 +442,11 @@ class Editor:
         self.search.set("")
         self.refresh_objects()
 
-    @staticmethod
-    def thing_name(thing):
+    def thing_name(self, thing):
+        if thing.category == 0:
+            name = self.project.server_files.item_name(thing.id)
+            if name:
+                return name
         for attr in thing.attributes:
             if attr.code == 33:
                 return str(attr.values[3])
@@ -500,6 +508,8 @@ class Editor:
             value.set("")
         self.slot_tree.delete(*self.slot_tree.get_children())
         self.loading = False
+        if hasattr(self, "server_panel"):
+            self.server_panel.refresh()
         self.animation_panel.load()
 
     def load_properties(self):
@@ -533,8 +543,12 @@ class Editor:
         self.refresh_slots()
         self.draw_preview()
         self.update_title()
+        if hasattr(self, "server_panel"):
+            self.server_panel.refresh()
 
     def apply_properties(self):
+        if hasattr(self, "server_panel") and not self.server_panel.apply():
+            return False
         if not self.thing or not self.pending:
             return True
         try:
@@ -953,7 +967,7 @@ class Editor:
             self.draw_preview()
 
     def about(self):
-        messagebox.showinfo("Backlands Asset Studio", "Editor desktop de DAT / SPR 8.60 para Backlands.\nSprites nativos de 16×16; sem redimensionamento implícito.\n\nInspirado no fluxo do ObjectBuilder de punkice3407.\nExtensões: IDs 32 bits, RGBA, durações e grupos via OTFI.\n\nO NexaMap deve usar o build NEXAMAP_SPRITE_PIXELS=16.\nOTB e XML do servidor são mantidos separadamente.\n\nConsulte object-editor/README.md para o formato das folhas.", parent=self.root)
+        messagebox.showinfo("Backlands Asset Studio", "Editor desktop de DAT / SPR 8.60 para Backlands.\nSprites nativos de 16×16; sem redimensionamento implícito.\n\nInspirado no fluxo do ObjectBuilder de punkice3407.\nExtensões: IDs 32 bits, RGBA, durações e grupos via OTFI.\n\nO NexaMap deve usar o build NEXAMAP_SPRITE_PIXELS=16.\nAssocie e edite XML/OTB na aba Itens do servidor.\n\nConsulte object-editor/README.md para o formato das folhas.", parent=self.root)
 
 
 def main(path: Path | None = None):

@@ -17,6 +17,10 @@ dist/
 *.obj
 *.lib
 
+# Backups e arquivos temporários do editor de assets.
+**/.backups/
+**/.backlands-stage-*/
+
 # Configuração local / segredos
 config.lua
 .env

@@ -95,6 +95,44 @@ para a geometria atual e cria novos IDs, preservando sprites compartilhadas.
 Exporte, edite a imagem e importe novamente para manter a disposição.
 **Exportar PNG da prévia** exporta só a composição e seleção atual, na resolução original.
 
+## Itens do servidor: XML e OTB
+
+A aba **Itens do servidor** associa o projeto visual ao `items.xml` e ao
+`items.otb`. Nos assets deste repositório, o editor encontra automaticamente
+`server/data/items/`. Também é possível escolher cada arquivo com **Associar**.
+O vínculo é salvo em `backlands-project.json` ao lado do OTFI, usando caminhos
+relativos quando possível. O diretório de assets do jogo já fica associado aos
+arquivos reais do servidor.
+
+A seleção e a pesquisa de itens passam a mostrar o nome do XML. A associação
+usa **ID do DAT = ClientID do OTB = id do XML**, conforme o servidor desta base.
+O ServerID legado é exibido para consulta e preservado.
+
+- Em **Definição XML do item**, edite o elemento completo: nome, artigo, plural,
+  peso, tipo, duração, transformação e demais atributos, inclusive os aninhados.
+  O ID deve ser mantido. Editar um item de um intervalo divide somente essa entrada,
+  preservando o restante da faixa, comentários e texto externo ao item.
+- Em **Propriedades OTB**, ajuste grupo, flags físicas, velocidade, minimapa,
+  luz, ordem superior e Ware ID. Flags e atributos desconhecidos são preservados.
+- **Criar registros ausentes** acrescenta o item selecionado com o mesmo ClientID.
+  Isso também permite cadastrar no servidor novos itens criados no DAT. A criação
+  é explícita; o catálogo não é regenerado a partir do DAT.
+- **Copiar flags do DAT → OTB** sincroniza as propriedades físicas compatíveis
+  do item selecionado, inclusive animação, uso, camadas superiores, chão e luz.
+  Use **Aplicar dados do servidor** para validar edições manuais em memória.
+
+**Salvar / Ctrl+S** grava os assets e os catálogos associados que foram editados,
+com backups e recuperação conjunta em caso de erro. Alterar apenas sprites ou
+animações não regrava o XML/OTB. Se outro programa alterar um catálogo pendente,
+o salvamento é bloqueado para evitar sobrescrever a outra edição; reassocie o
+arquivo atualizado antes de continuar.
+
+Ao usar **Salvar como** em um projeto já salvo, os catálogos associados são
+copiados para `server-items/` dentro da pasta exportada, e a cópia passa a apontar
+para esses arquivos. Os originais do servidor permanecem intactos. No primeiro
+salvamento de um projeto novo, arquivos associados manualmente são gravados nos
+caminhos escolhidos e exibidos no painel.
+
 ## Compatibilidade e arquivos
 
 - Formato DAT da família **8.60**, com flags de 0 a 37 reconhecidas pela base
@@ -112,9 +150,9 @@ Exporte, edite a imagem e importe novamente para manter a disposição.
 - O [NexaMap](../map-editor) precisa ser compilado com
   `-DNEXAMAP_SPRITE_PIXELS=16`. A ferramenta de migração clássica do NexaMap
   ainda contém restrições a 32px; este editor não altera essa ferramenta.
-- `items.otb`, `items.xml`, atlas do futuro cliente web e mapas OTBM são mantidos
-  separadamente. Criar um item no DAT não cria automaticamente sua regra no servidor.
-  Nesta base, mantenha o mesmo ClientID no DAT, OTB e XML.
+- `items.otb` e `items.xml` podem ser associados e editados no projeto. Atlas do
+  futuro cliente web e mapas OTBM permanecem separados. Criar uma aparência não
+  define automaticamente regras de jogo; cadastre seus registros na aba de servidor.
 
 Para os assets antigos de 32px, use o conversor de teste já existente:
 
@@ -128,9 +166,10 @@ Ele reescala arte e propriedades em pixels; arte final deve ser desenhada em 16p
 
 Antes de sobrescrever, o editor valida referências, serializa e relê os dois
 arquivos binários. Arquivos anteriores são copiados para `.backups/<data-hora-id>/`
-dentro da pasta escolhida. A gravação usa arquivos temporários e restaura os originais
-se uma substituição falhar. Isso trata erros de gravação; três arquivos separados
-não constituem uma transação garantida em caso de queda de energia.
+ao lado dos arquivos originais, inclusive nos diretórios dos catálogos do servidor.
+A gravação usa arquivos temporários no mesmo sistema de arquivos de cada destino
+e restaura os originais se uma substituição falhar. Isso trata erros de gravação;
+arquivos separados não constituem uma transação garantida em caso de queda de energia.
 
 Limites de proteção: 262.144 referências por grupo, 2 milhões de sprites no formato
 estendido, PNG com até 8.192 pixels por lado e 16.777.216 pixels no total.
