@@ -1,0 +1,687 @@
+//////////////////////////////////////////////////////////////////////
+// This file is part of Remere's Map Editor
+//////////////////////////////////////////////////////////////////////
+// Remere's Map Editor is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Remere's Map Editor is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+//////////////////////////////////////////////////////////////////////
+
+#include "main.h"
+
+#include "settings.h"
+#include "gui.h"
+#include "brush.h"
+
+#include "palette_window.h"
+#include "palette_brushlist.h"
+#include "palette_brush_tool.h"
+#include "palette_house.h"
+#include "palette_creature.h"
+#include "palette_waypoints.h"
+#include "palette_zones.h"
+#include "palette_saved_terrain.h"
+#include "palette_favorites.h"
+#include "favorites_resources.h"
+#include "editor_resource_session.h"
+#include "materials.h"
+#include <wx/wupdlock.h>
+
+#include "map.h"
+
+// ============================================================================
+// Palette window
+
+BEGIN_EVENT_TABLE(PaletteWindow, wxPanel)
+EVT_CHOICEBOOK_PAGE_CHANGING(PALETTE_CHOICEBOOK, PaletteWindow::OnSwitchingPage)
+EVT_CHOICEBOOK_PAGE_CHANGED(PALETTE_CHOICEBOOK, PaletteWindow::OnPageChanged)
+EVT_CLOSE(PaletteWindow::OnClose)
+
+EVT_KEY_DOWN(PaletteWindow::OnKey)
+END_EVENT_TABLE()
+
+PaletteWindow::PaletteWindow(wxWindow* parent, const TilesetContainer& tilesets) :
+	wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(230, 250)),
+	choicebook(nullptr),
+	terrain_palette(nullptr),
+	doodad_palette(nullptr),
+	item_palette(nullptr),
+	collection_palette(nullptr),
+	creature_palette(nullptr),
+	house_palette(nullptr),
+	waypoint_palette(nullptr),
+	zones_palette(nullptr),
+	saved_terrain_palette(nullptr),
+	raw_palette(nullptr) {
+	resource_session = GetActiveEditorResourceSession();
+	resource_context = FavoriteResources::ActiveContext();
+	SetMinSize(wxSize(225, 250));
+
+	// Create choicebook
+	choicebook = newd wxChoicebook(this, PALETTE_CHOICEBOOK, wxDefaultPosition, wxSize(230, 250));
+
+	terrain_palette = static_cast<BrushPalettePanel*>(CreateTerrainPalette(choicebook, tilesets));
+	choicebook->AddPage(terrain_palette, terrain_palette->GetName());
+
+	doodad_palette = static_cast<BrushPalettePanel*>(CreateDoodadPalette(choicebook, tilesets));
+	choicebook->AddPage(doodad_palette, doodad_palette->GetName());
+
+	collection_palette = static_cast<BrushPalettePanel*>(CreateCollectionPalette(choicebook, tilesets));
+	if (collection_palette) {
+		choicebook->AddPage(collection_palette, collection_palette->GetName());
+	}
+
+	item_palette = static_cast<BrushPalettePanel*>(CreateItemPalette(choicebook, tilesets));
+	choicebook->AddPage(item_palette, item_palette->GetName());
+
+	house_palette = static_cast<HousePalettePanel*>(CreateHousePalette(choicebook, tilesets));
+	choicebook->AddPage(house_palette, house_palette->GetName());
+
+	waypoint_palette = static_cast<WaypointPalettePanel*>(CreateWaypointPalette(choicebook, tilesets));
+	choicebook->AddPage(waypoint_palette, waypoint_palette->GetName());
+
+	zones_palette = static_cast<ZonesPalettePanel*>(CreateZonesPalette(choicebook, tilesets));
+	choicebook->AddPage(zones_palette, zones_palette->GetName());
+
+	saved_terrain_palette = static_cast<SavedTerrainPalettePanel*>(CreateSavedTerrainPalette(choicebook, tilesets));
+	choicebook->AddPage(saved_terrain_palette, saved_terrain_palette->GetName());
+
+	creature_palette = static_cast<CreaturePalettePanel*>(CreateCreaturePalette(choicebook, tilesets));
+	choicebook->AddPage(creature_palette, creature_palette->GetName());
+
+	raw_palette = static_cast<BrushPalettePanel*>(CreateRAWPalette(choicebook, tilesets));
+	choicebook->AddPage(raw_palette, raw_palette->GetName());
+	favorites_palette = new FavoritesPalettePanel(choicebook);
+	choicebook->AddPage(favorites_palette, favorites_palette->GetName());
+
+	// Setup sizers
+	wxSizer* sizer = newd wxBoxSizer(wxVERTICAL);
+	choicebook->SetMinSize(wxSize(225, 300));
+	sizer->Add(choicebook, 1, wxEXPAND);
+	SetSizer(sizer);
+
+	// Load first page
+	LoadCurrentContents();
+
+	Fit();
+}
+
+PaletteWindow::~PaletteWindow() {
+	////
+}
+
+bool PaletteWindow::HasCurrentResources() const {
+	return resource_session.lock() == GetActiveEditorResourceSession() && resource_context == FavoriteResources::ActiveContext() && !resource_context.empty();
+}
+
+void PaletteWindow::RefreshFavorites() {
+	if (favorites_palette && HasCurrentResources()) {
+		favorites_palette->RefreshFavorites();
+	}
+}
+
+PalettePanel* PaletteWindow::CreateTerrainPalette(wxWindow* parent, const TilesetContainer& tilesets) {
+	auto* panel = newd BrushPalettePanel(parent, tilesets, TILESET_TERRAIN);
+	panel->SetListType(wxstr(g_settings.getString(Config::PALETTE_TERRAIN_STYLE)));
+
+	auto* tool_panel = newd BrushToolPanel(panel);
+	tool_panel->SetToolbarIconSize(g_settings.getBoolean(Config::USE_LARGE_TERRAIN_TOOLBAR));
+	panel->AddToolPanel(tool_panel);
+
+	auto* size_panel = newd BrushSizePanel(panel);
+	size_panel->SetToolbarIconSize(g_settings.getBoolean(Config::USE_LARGE_TERRAIN_TOOLBAR));
+	panel->AddToolPanel(size_panel);
+
+	return panel;
+}
+
+PalettePanel* PaletteWindow::CreateCollectionPalette(wxWindow* parent, const TilesetContainer& tilesets) {
+	if (!Materials::hasCollections(tilesets)) {
+		return nullptr;
+	}
+	auto* panel = newd BrushPalettePanel(parent, tilesets, TILESET_COLLECTION);
+	panel->SetListType(wxstr(g_settings.getString(Config::PALETTE_COLLECTION_STYLE)));
+
+	// terrain palette tools
+	auto* tool_panel = newd BrushToolPanel(panel);
+	tool_panel->SetToolbarIconSize(g_settings.getBoolean(Config::USE_LARGE_COLLECTION_TOOLBAR));
+	panel->AddToolPanel(tool_panel);
+
+	// brush thickness panel
+	panel->AddToolPanel(newd BrushThicknessPanel(panel));
+
+	// brush size tools
+	auto* size_panel = newd BrushSizePanel(panel);
+	size_panel->SetToolbarIconSize(g_settings.getBoolean(Config::USE_LARGE_COLLECTION_TOOLBAR));
+	panel->AddToolPanel(size_panel);
+
+	return panel;
+}
+
+PalettePanel* PaletteWindow::CreateDoodadPalette(wxWindow* parent, const TilesetContainer& tilesets) {
+	auto* panel = newd BrushPalettePanel(parent, tilesets, TILESET_DOODAD);
+	panel->SetListType(wxstr(g_settings.getString(Config::PALETTE_DOODAD_STYLE)));
+
+	panel->AddToolPanel(newd BrushThicknessPanel(panel));
+
+	auto* size_panel = newd BrushSizePanel(panel);
+	size_panel->SetToolbarIconSize(g_settings.getBoolean(Config::USE_LARGE_DOODAD_SIZEBAR));
+	panel->AddToolPanel(size_panel);
+
+	return panel;
+}
+
+PalettePanel* PaletteWindow::CreateItemPalette(wxWindow* parent, const TilesetContainer& tilesets) {
+	auto* panel = newd BrushPalettePanel(parent, tilesets, TILESET_ITEM);
+	panel->SetListType(wxstr(g_settings.getString(Config::PALETTE_ITEM_STYLE)));
+
+	auto* size_panel = newd BrushSizePanel(panel);
+	size_panel->SetToolbarIconSize(g_settings.getBoolean(Config::USE_LARGE_ITEM_SIZEBAR));
+	panel->AddToolPanel(size_panel);
+	return panel;
+}
+
+PalettePanel* PaletteWindow::CreateHousePalette(wxWindow* parent, const TilesetContainer& tilesets) {
+	auto* panel = newd HousePalettePanel(parent);
+
+	auto* size_panel = newd BrushSizePanel(panel);
+	size_panel->SetToolbarIconSize(g_settings.getBoolean(Config::USE_LARGE_HOUSE_SIZEBAR));
+	panel->AddToolPanel(size_panel);
+	return panel;
+}
+
+PalettePanel* PaletteWindow::CreateWaypointPalette(wxWindow* parent, const TilesetContainer& tilesets) {
+	auto* panel = newd WaypointPalettePanel(parent);
+	return panel;
+}
+
+PalettePanel* PaletteWindow::CreateZonesPalette(wxWindow* parent, const TilesetContainer& tilesets) {
+	auto* panel = newd ZonesPalettePanel(parent);
+	return panel;
+}
+
+PalettePanel* PaletteWindow::CreateSavedTerrainPalette(wxWindow* parent, const TilesetContainer&) {
+	return newd SavedTerrainPalettePanel(parent);
+}
+
+PalettePanel* PaletteWindow::CreateCreaturePalette(wxWindow* parent, const TilesetContainer& tilesets) {
+	auto* panel = newd CreaturePalettePanel(parent);
+	return panel;
+}
+
+PalettePanel* PaletteWindow::CreateRAWPalette(wxWindow* parent, const TilesetContainer& tilesets) {
+	auto* panel = newd BrushPalettePanel(parent, tilesets, TILESET_RAW);
+	panel->SetListType(wxstr(g_settings.getString(Config::PALETTE_RAW_STYLE)));
+
+	auto* size_panel = newd BrushSizePanel(panel);
+	size_panel->SetToolbarIconSize(g_settings.getBoolean(Config::USE_LARGE_RAW_SIZEBAR));
+	panel->AddToolPanel(size_panel);
+
+	return panel;
+}
+
+void PaletteWindow::RefreshCollectionPalette(bool rebuild) {
+	// Resource switches destroy palettes before swapping registries. Ignore any
+	// late event from the old session rather than binding it to the new brushes.
+	if (resource_session.lock() != GetActiveEditorResourceSession()) {
+		return;
+	}
+	const bool available = g_materials.hasCollections();
+	if (available == (collection_palette != nullptr) && (!rebuild || !available)) {
+		return;
+	}
+	const PaletteType selected = GetSelectedPage();
+	wxWindowUpdateLocker freeze(this);
+	wxEventBlocker block(choicebook);
+	if (collection_palette) {
+		const int index = choicebook->FindPage(collection_palette);
+		BrushPalettePanel* previous = collection_palette;
+		collection_palette = nullptr;
+		if (index != wxNOT_FOUND) {
+			choicebook->DeletePage(index);
+		} else {
+			previous->Destroy();
+		}
+	}
+	if (available) {
+		collection_palette = static_cast<BrushPalettePanel*>(CreateCollectionPalette(choicebook, g_materials.tilesets));
+		choicebook->InsertPage(2, collection_palette, collection_palette->GetName());
+	}
+	const auto target = selected == TILESET_COLLECTION && !available ? TILESET_TERRAIN : selected;
+	for (size_t i = 0; i < choicebook->GetPageCount(); ++i) {
+		if (static_cast<PalettePanel*>(choicebook->GetPage(i))->GetType() == target) {
+			choicebook->ChangeSelection(i);
+			break;
+		}
+	}
+	LoadCurrentContents();
+	Layout();
+	if (g_gui.root) {
+		g_gui.UpdateMenus();
+	}
+}
+
+void PaletteWindow::ReloadSettings(Map* map) {
+	if (resource_session.lock() != GetActiveEditorResourceSession()) {
+		return;
+	}
+	RefreshCollectionPalette(true);
+	if (terrain_palette) {
+		terrain_palette->SetListType(wxstr(g_settings.getString(Config::PALETTE_TERRAIN_STYLE)));
+		terrain_palette->SetToolbarIconSize(g_settings.getBoolean(Config::USE_LARGE_TERRAIN_TOOLBAR));
+	}
+	if (doodad_palette) {
+		doodad_palette->SetListType(wxstr(g_settings.getString(Config::PALETTE_DOODAD_STYLE)));
+		doodad_palette->SetToolbarIconSize(g_settings.getBoolean(Config::USE_LARGE_DOODAD_SIZEBAR));
+	}
+	if (house_palette) {
+		house_palette->SetMap(map);
+		house_palette->SetToolbarIconSize(g_settings.getBoolean(Config::USE_LARGE_HOUSE_SIZEBAR));
+	}
+	if (waypoint_palette) {
+		waypoint_palette->SetMap(map);
+	}
+	if (zones_palette) {
+		zones_palette->SetMap(map);
+	}
+	if (saved_terrain_palette) {
+		saved_terrain_palette->ReloadList();
+	}
+	if (item_palette) {
+		item_palette->SetListType(wxstr(g_settings.getString(Config::PALETTE_ITEM_STYLE)));
+		item_palette->SetToolbarIconSize(g_settings.getBoolean(Config::USE_LARGE_ITEM_SIZEBAR));
+	}
+	if (collection_palette) {
+		collection_palette->SetListType(wxstr(g_settings.getString(Config::PALETTE_COLLECTION_STYLE)));
+		collection_palette->SetToolbarIconSize(g_settings.getBoolean(Config::USE_LARGE_COLLECTION_TOOLBAR));
+	}
+	if (raw_palette) {
+		raw_palette->SetListType(wxstr(g_settings.getString(Config::PALETTE_RAW_STYLE)));
+		raw_palette->SetToolbarIconSize(g_settings.getBoolean(Config::USE_LARGE_RAW_SIZEBAR));
+	}
+	InvalidateContents();
+}
+
+void PaletteWindow::LoadCurrentContents() {
+	if (!choicebook || resource_session.lock() != GetActiveEditorResourceSession()) {
+		return;
+	}
+	auto* panel = dynamic_cast<PalettePanel*>(choicebook->GetCurrentPage());
+	if (panel) {
+		panel->LoadCurrentContents();
+	}
+	Fit();
+	Refresh();
+	Update();
+}
+
+void PaletteWindow::InvalidateContents() {
+	if (!choicebook) {
+		return;
+	}
+	for (size_t iz = 0; iz < choicebook->GetPageCount(); ++iz) {
+		auto* panel = dynamic_cast<PalettePanel*>(choicebook->GetPage(iz));
+		panel->InvalidateContents();
+	}
+	LoadCurrentContents();
+	if (creature_palette) {
+		creature_palette->OnUpdate();
+	}
+	if (house_palette) {
+		house_palette->OnUpdate();
+	}
+	if (waypoint_palette) {
+		waypoint_palette->OnUpdate();
+	}
+	if (zones_palette) {
+		zones_palette->OnUpdate();
+	}
+	if (saved_terrain_palette) {
+		saved_terrain_palette->OnUpdate();
+	}
+}
+
+void PaletteWindow::SelectPage(PaletteType id) {
+	if (!choicebook || resource_session.lock() != GetActiveEditorResourceSession()) {
+		return;
+	}
+	if (id == GetSelectedPage()) {
+		return;
+	}
+
+	for (size_t iz = 0; iz < choicebook->GetPageCount(); ++iz) {
+		auto* panel = dynamic_cast<PalettePanel*>(choicebook->GetPage(iz));
+		if (panel->GetType() == id) {
+			choicebook->SetSelection(iz);
+			break;
+		}
+	}
+}
+
+Brush* PaletteWindow::GetSelectedBrush() const {
+	if (!choicebook || resource_session.lock() != GetActiveEditorResourceSession()) {
+		return nullptr;
+	}
+	auto* panel = dynamic_cast<PalettePanel*>(choicebook->GetCurrentPage());
+	return panel ? panel->GetSelectedBrush() : nullptr;
+}
+
+int PaletteWindow::GetSelectedBrushSize() const {
+	if (!choicebook) {
+		return 0;
+	}
+	auto* panel = dynamic_cast<PalettePanel*>(choicebook->GetCurrentPage());
+	return panel->GetSelectedBrushSize();
+}
+
+PaletteType PaletteWindow::GetSelectedPage() const {
+	if (!choicebook) {
+		return TILESET_UNKNOWN;
+	}
+	auto* panel = dynamic_cast<PalettePanel*>(choicebook->GetCurrentPage());
+	ASSERT(panel);
+	return panel->GetType();
+}
+
+bool PaletteWindow::OnSelectBrush(const Brush* whatbrush, PaletteType primary) {
+	if (!choicebook || !whatbrush || resource_session.lock() != GetActiveEditorResourceSession()) {
+		return false;
+	}
+
+	if (whatbrush->isHouse() && house_palette) {
+		house_palette->SelectBrush(whatbrush);
+		SelectPage(TILESET_HOUSE);
+		return true;
+	}
+
+	if (whatbrush->isZone() && zones_palette) {
+		zones_palette->SelectBrush(whatbrush);
+		SelectPage(TILESET_ZONES);
+		return true;
+	}
+
+	if (whatbrush->isWaypoint() && waypoint_palette) {
+		waypoint_palette->SelectBrush(whatbrush);
+		SelectPage(TILESET_WAYPOINT);
+		return true;
+	}
+
+	switch (primary) {
+		case TILESET_FAVORITES:
+			if (favorites_palette && favorites_palette->SelectBrush(whatbrush)) {
+				SelectPage(TILESET_FAVORITES);
+				return true;
+			}
+			break;
+		case TILESET_TERRAIN: {
+			// This is already searched first
+			break;
+		}
+		case TILESET_DOODAD: {
+			// Ok, search doodad before terrain
+			if (doodad_palette && doodad_palette->SelectBrush(whatbrush)) {
+				SelectPage(TILESET_DOODAD);
+				return true;
+			}
+			break;
+		}
+		case TILESET_COLLECTION: {
+			if (collection_palette && collection_palette->SelectBrush(whatbrush)) {
+				SelectPage(TILESET_COLLECTION);
+				return true;
+			}
+			[[fallthrough]];
+		}
+		case TILESET_ITEM: {
+			if (item_palette && item_palette->SelectBrush(whatbrush)) {
+				SelectPage(TILESET_ITEM);
+				return true;
+			}
+			break;
+		}
+		case TILESET_CREATURE: {
+			if (creature_palette && creature_palette->SelectBrush(whatbrush)) {
+				SelectPage(TILESET_CREATURE);
+				return true;
+			}
+			break;
+		}
+		case TILESET_RAW: {
+			if (raw_palette && raw_palette->SelectBrush(whatbrush)) {
+				SelectPage(TILESET_RAW);
+				return true;
+			}
+			break;
+		}
+		default:
+			break;
+	}
+
+	// Test if it's a terrain brush
+	if (terrain_palette && terrain_palette->SelectBrush(whatbrush)) {
+		SelectPage(TILESET_TERRAIN);
+		return true;
+	}
+
+	// Test if it's a doodad brush
+	if (primary != TILESET_DOODAD) {
+		if (doodad_palette && doodad_palette->SelectBrush(whatbrush)) {
+			SelectPage(TILESET_DOODAD);
+			return true;
+		}
+	}
+
+	// Test if it's an item brush
+	if (primary != TILESET_ITEM) {
+		if (item_palette && item_palette->SelectBrush(whatbrush)) {
+			SelectPage(TILESET_ITEM);
+			return true;
+		}
+	}
+
+	// Test if it's a creature brush
+	if (primary != TILESET_CREATURE) {
+		if (creature_palette && creature_palette->SelectBrush(whatbrush)) {
+			SelectPage(TILESET_CREATURE);
+			return true;
+		}
+	}
+
+	// Test if it's a raw brush
+	if (primary != TILESET_RAW) {
+		if (raw_palette && raw_palette->SelectBrush(whatbrush)) {
+			SelectPage(TILESET_RAW);
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool PaletteWindow::JumpToBrush(const Brush* brush, const std::string& preferredPalette, int targetCategory, const std::string& targetTilesetName) {
+	if (!brush || !choicebook || resource_session.lock() != GetActiveEditorResourceSession()) {
+		return false;
+	}
+
+	BrushPalettePanel* targetBrushPalettePanel = nullptr;
+	std::string resolvedTilesetName = targetTilesetName;
+	int targetPageIndex = wxNOT_FOUND;
+
+	// 1. If explicit category provenance is available, find matching palette panel
+	if (targetCategory != 0) {
+		for (size_t i = 0; i < choicebook->GetPageCount(); ++i) {
+			auto* p = dynamic_cast<BrushPalettePanel*>(choicebook->GetPage(i));
+			if (p && p->GetType() == static_cast<PaletteType>(targetCategory)) {
+				targetBrushPalettePanel = p;
+				targetPageIndex = static_cast<int>(i);
+				if (resolvedTilesetName.empty()) {
+					resolvedTilesetName = p->FindTilesetNameForBrush(brush);
+				}
+				break;
+			}
+		}
+	}
+
+	// 2. If not matched, try preferred palette name
+	if (!targetBrushPalettePanel && !preferredPalette.empty()) {
+		for (size_t i = 0; i < choicebook->GetPageCount(); ++i) {
+			auto* p = dynamic_cast<BrushPalettePanel*>(choicebook->GetPage(i));
+			if (p && (nstr(p->GetName()) == preferredPalette || p->GetName() == wxstr(preferredPalette))) {
+				std::string tsName = p->FindTilesetNameForBrush(brush);
+				if (!tsName.empty()) {
+					targetBrushPalettePanel = p;
+					resolvedTilesetName = std::move(tsName);
+					targetPageIndex = static_cast<int>(i);
+					break;
+				}
+			}
+		}
+	}
+
+	// 3. Fallback scan all panels
+	if (!targetBrushPalettePanel) {
+		for (size_t i = 0; i < choicebook->GetPageCount(); ++i) {
+			auto* p = dynamic_cast<BrushPalettePanel*>(choicebook->GetPage(i));
+			if (p) {
+				std::string tsName = p->FindTilesetNameForBrush(brush);
+				if (!tsName.empty()) {
+					targetBrushPalettePanel = p;
+					resolvedTilesetName = std::move(tsName);
+					targetPageIndex = static_cast<int>(i);
+					break;
+				}
+			}
+		}
+	}
+
+	if (!targetBrushPalettePanel || targetPageIndex == wxNOT_FOUND) {
+		return OnSelectBrush(brush);
+	}
+
+	auto* currentPanel = dynamic_cast<BrushPalettePanel*>(choicebook->GetCurrentPage());
+	if (currentPanel && currentPanel != targetBrushPalettePanel) {
+		currentPanel->ResetFilter();
+	}
+
+	if (choicebook->GetSelection() != targetPageIndex) {
+		choicebook->SetSelection(targetPageIndex);
+	}
+
+	return targetBrushPalettePanel->JumpToTilesetAndBrush(resolvedTilesetName, brush);
+}
+
+void PaletteWindow::OnSwitchingPage(wxChoicebookEvent& event) {
+	event.Skip();
+	if (!choicebook || resource_session.lock() != GetActiveEditorResourceSession()) {
+		return;
+	}
+
+	wxWindow* old_page = choicebook->GetPage(choicebook->GetSelection());
+	auto* old_panel = dynamic_cast<PalettePanel*>(old_page);
+	if (old_panel) {
+		old_panel->OnSwitchOut();
+	}
+
+	wxWindow* page = choicebook->GetPage(event.GetSelection());
+	auto* panel = dynamic_cast<PalettePanel*>(page);
+	if (panel) {
+		panel->OnSwitchIn();
+	}
+}
+
+void PaletteWindow::OnPageChanged(wxChoicebookEvent& event) {
+	if (!choicebook || resource_session.lock() != GetActiveEditorResourceSession()) {
+		return;
+	}
+	g_gui.SelectBrush();
+}
+
+void PaletteWindow::OnUpdateBrushSize(BrushShape shape, int size) {
+	if (!choicebook) {
+		return;
+	}
+	auto* page = dynamic_cast<PalettePanel*>(choicebook->GetCurrentPage());
+	ASSERT(page);
+	page->OnUpdateBrushSize(shape, size);
+}
+
+void PaletteWindow::OnUpdate(Map* map) {
+	if (resource_session.lock() != GetActiveEditorResourceSession()) {
+		return;
+	}
+	RefreshCollectionPalette();
+	if (favorites_palette) {
+		favorites_palette->OnUpdate();
+	}
+	if (creature_palette) {
+		creature_palette->OnUpdate();
+	}
+	if (house_palette) {
+		house_palette->SetMap(map);
+	}
+	if (waypoint_palette) {
+		waypoint_palette->SetMap(map);
+		waypoint_palette->OnUpdate();
+	}
+	if (zones_palette) {
+		zones_palette->SetMap(map);
+		zones_palette->OnUpdate();
+	}
+	if (saved_terrain_palette) {
+		saved_terrain_palette->OnUpdate();
+	}
+}
+
+void PaletteWindow::SelectWaypoint(Waypoint* wp) {
+	if (waypoint_palette) {
+		waypoint_palette->SelectWaypoint(wp);
+	}
+}
+
+bool PaletteWindow::RenameWaypointFromMap(const std::string& oldName, const std::string& newName) {
+	if (!waypoint_palette) {
+		return false;
+	}
+	const bool renamed = waypoint_palette->RenameWaypoint(oldName, newName);
+	if (renamed) {
+		waypoint_palette->refreshWaypointTree();
+	}
+	return renamed;
+}
+
+bool PaletteWindow::DeleteWaypointFromMap(const std::string& name) {
+	if (!waypoint_palette) {
+		return false;
+	}
+	const bool deleted = waypoint_palette->DeleteWaypoint(name);
+	if (deleted) {
+		waypoint_palette->refreshWaypointTree();
+		g_gui.RefreshView();
+	}
+	return deleted;
+}
+
+void PaletteWindow::OnKey(wxKeyEvent& event) {
+	if (g_gui.GetCurrentTab() != nullptr) {
+		g_gui.GetCurrentMapTab()->GetEventHandler()->AddPendingEvent(event);
+	}
+}
+
+void PaletteWindow::OnClose(wxCloseEvent& event) {
+	if (!event.CanVeto()) {
+		// We can't do anything! This sucks!
+		// (application is closed, we have to destroy ourselves)
+		Destroy();
+	} else {
+		Show(false);
+		event.Veto(true);
+	}
+}

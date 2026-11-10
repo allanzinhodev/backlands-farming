@@ -1,0 +1,229 @@
+//////////////////////////////////////////////////////////////////////
+// This file is part of Remere's Map Editor
+//////////////////////////////////////////////////////////////////////
+// Remere's Map Editor is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Remere's Map Editor is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+//////////////////////////////////////////////////////////////////////
+
+#ifndef RME_OTBM_MAP_IO_H_
+#define RME_OTBM_MAP_IO_H_
+
+#include "iomap.h"
+
+#include <functional>
+#include <string>
+#include <utility>
+
+class FileSaveTransaction;
+
+using OTBMMemoryBudgetCheck = std::function<bool(const char* phase, uint64_t pendingBytes, std::string& error)>;
+
+struct OTBMFileMetadata {
+	MapVersion version;
+	uint32_t itemMajorVersion = 0;
+	uint32_t itemMinorVersion = 0;
+	std::string spawnFile;
+	std::string spawnNpcFile;
+	std::string zoneFile;
+};
+
+// Pragma pack is VERY important since otherwise it won't be able to load the structs correctly
+#pragma pack(1)
+
+enum OTBM_ItemAttribute {
+	OTBM_ATTR_DESCRIPTION = 1,
+	OTBM_ATTR_EXT_FILE = 2,
+	OTBM_ATTR_TILE_FLAGS = 3,
+	OTBM_ATTR_ACTION_ID = 4,
+	OTBM_ATTR_UNIQUE_ID = 5,
+	OTBM_ATTR_TEXT = 6,
+	OTBM_ATTR_DESC = 7,
+	OTBM_ATTR_TELE_DEST = 8,
+	OTBM_ATTR_ITEM = 9,
+	OTBM_ATTR_DEPOT_ID = 10,
+	OTBM_ATTR_EXT_SPAWN_FILE = 11,
+	OTBM_ATTR_RUNE_CHARGES = 12,
+	OTBM_ATTR_EXT_HOUSE_FILE = 13,
+	OTBM_ATTR_HOUSEDOORID = 14,
+	OTBM_ATTR_COUNT = 15,
+	OTBM_ATTR_DURATION = 16,
+	OTBM_ATTR_DECAYING_STATE = 17,
+	OTBM_ATTR_WRITTENDATE = 18,
+	OTBM_ATTR_WRITTENBY = 19,
+	OTBM_ATTR_SLEEPERGUID = 20,
+	OTBM_ATTR_SLEEPSTART = 21,
+	OTBM_ATTR_CHARGES = 22,
+
+	// RME (parse without loading only)
+	OTBM_ATTR_EXT_SPAWN_NPC_FILE = 23,
+	OTBM_ATTR_EXT_ZONE_FILE = 24,
+
+	OTBM_ATTR_PODIUMOUTFIT = 40,
+	OTBM_ATTR_TIER = 41,
+	OTBM_ATTR_ATTRIBUTE_MAP = 128
+};
+
+enum OTBM_NodeTypes_t {
+	OTBM_ROOTV1 = 1,
+	OTBM_MAP_DATA = 2,
+	OTBM_ITEM_DEF = 3,
+	OTBM_TILE_AREA = 4,
+	OTBM_TILE = 5,
+	OTBM_ITEM = 6,
+	OTBM_TILE_SQUARE = 7,
+	OTBM_TILE_REF = 8,
+	OTBM_SPAWNS = 9,
+	OTBM_SPAWN_AREA = 10,
+	OTBM_MONSTER = 11,
+	OTBM_TOWNS = 12,
+	OTBM_TOWN = 13,
+	OTBM_HOUSETILE = 14,
+	OTBM_WAYPOINTS = 15,
+	OTBM_WAYPOINT = 16,
+
+	// Canary RME (unused)
+	// OTBM_SPAWN_NPC_AREA = 17,
+	// OTBM_SPAWNS_NPC = 18,
+	OTBM_TILE_ZONE = 19,
+};
+
+enum PodiumFlags : uint8_t {
+	PODIUM_SHOW_PLATFORM = 1 << 0, // show the platform below the outfit
+	PODIUM_SHOW_OUTFIT = 1 << 1, // show outfit
+	PODIUM_SHOW_MOUNT = 1 << 2 // show mount
+};
+
+struct OTBM_root_header {
+	uint32_t version;
+	uint16_t width;
+	uint16_t height;
+	uint32_t majorVersionItems;
+	uint32_t minorVersionItems;
+};
+
+struct OTBM_TeleportDest {
+	uint16_t x;
+	uint16_t y;
+	uint8_t z;
+};
+
+struct OTBM_Tile_area_coords {
+	uint16_t x;
+	uint16_t y;
+	uint8_t z;
+};
+
+struct OTBM_Tile_coords {
+	uint8_t x;
+	uint8_t y;
+};
+
+struct OTBM_TownTemple_coords {
+	uint16_t x;
+	uint16_t y;
+	uint8_t z;
+};
+
+struct OTBM_HouseTile_coords {
+	uint8_t x;
+	uint8_t y;
+	uint32_t houseid;
+};
+
+#pragma pack()
+
+class IOMapOTBM : public IOMap {
+public:
+	IOMapOTBM(MapVersion ver) {
+		version = ver;
+	}
+	~IOMapOTBM() override { }
+
+	static bool getVersionInfo(const FileName& identifier, MapVersion& out_ver, uint32_t* itemMajorVersion = nullptr, const OTBMMemoryBudgetCheck& memoryBudgetCheck = {});
+	static bool getFileMetadata(const FileName& identifier, OTBMFileMetadata& metadata, const OTBMMemoryBudgetCheck& memoryBudgetCheck = {});
+
+	bool loadMap(Map& map, const FileName& identifier) override;
+	bool saveMap(Map& map, const FileName& identifier) override;
+	bool loadMapData(Map& map, const FileName& identifier);
+	bool saveMapData(Map& map, const FileName& identifier);
+	void useItemVersionHeader(uint32_t majorVersion, uint32_t minorVersion) {
+		headerItemMajorVersion = majorVersion;
+		headerItemMinorVersion = minorVersion;
+	}
+	void useItemIdCodec(const ItemIdCodec* codec) {
+		setItemIdCodec(codec);
+	}
+	void useMemoryBudgetCheck(OTBMMemoryBudgetCheck check) {
+		memoryBudgetCheck = std::move(check);
+	}
+
+	static bool saveZones(Map& map, pugi::xml_document& doc);
+
+	// Header references can differ from the disk in case only. Windows hides
+	// that and Linux does not, so the on-disk spelling is looked up when the
+	// exact name is missing. Returns the name unchanged unless one file matches.
+	static std::string resolveSidecarName(const FileName& mapFile, const std::string& name);
+
+protected:
+	enum class SpawnLoadStatus {
+		Loaded,
+		Unavailable,
+		Cancelled,
+	};
+
+	static bool getVersionInfo(NodeFileReadHandle* f, MapVersion& out_ver, uint32_t* itemMajorVersion = nullptr);
+	static bool getFileMetadata(NodeFileReadHandle* f, OTBMFileMetadata& metadata);
+
+	virtual bool loadMap(Map& map, NodeFileReadHandle& handle);
+	void readMapHeaderAttributes(BinaryNode* mapHeaderNode, Map& map);
+	bool readTileArea(BinaryNode* mapNode, Map& map);
+	void readTowns(BinaryNode* mapNode, Map& map);
+	void readWaypoints(BinaryNode* mapNode, Map& map);
+	bool writeTiles(Map& map, NodeFileWriteHandle& f);
+	void writeTowns(Map& map, NodeFileWriteHandle& f);
+	void writeWaypoints(Map& map, NodeFileWriteHandle& f, bool& waypointsWarning);
+	SpawnLoadStatus loadSpawns(Map& map, const FileName& dir);
+	bool loadHouses(Map& map, const FileName& dir);
+	bool loadHouses(Map& map, pugi::xml_document& doc);
+	bool loadWaypoints(Map& map, const FileName& dir);
+	bool loadWaypoints(Map& map, pugi::xml_document& doc);
+	bool loadWaypointGroups(Map& map, const FileName& dir);
+	bool loadZones(Map& map, const FileName& dir);
+	bool loadZones(Map& map, pugi::xml_document& doc);
+
+	virtual bool saveMap(Map& map, NodeFileWriteHandle& handle);
+	bool stageMapData(Map& map, const FileName& identifier, FileSaveTransaction& transaction);
+	bool stageSpawns(Map& map, const FileName& dir, FileSaveTransaction& transaction);
+	bool stageHouses(Map& map, const FileName& dir, FileSaveTransaction& transaction);
+	bool saveHouses(Map& map, pugi::xml_document& doc);
+	bool saveWaypoints(Map& map, pugi::xml_document& doc);
+	bool stageWaypointGroups(Map& map, const FileName& dir, FileSaveTransaction& transaction, wxString& staleFile);
+	bool stageZones(Map& map, const FileName& dir, FileSaveTransaction& transaction);
+	bool checkUnloadedSidecars(const Map& map, const FileName& dir);
+
+private:
+	bool checkMemoryBudget(const char* phase, uint64_t pendingBytes = 0);
+	// Reports the read position as load progress. Returns false when the user
+	// cancelled. Also the only thing that pumps the message queue during a load,
+	// so it has to be reachable from the inner tile loop and not just once per
+	// batch of tile areas.
+	bool reportLoadProgress();
+	static bool prependXmlDeclaration(pugi::xml_document& doc);
+	uint32_t headerItemMajorVersion = 0;
+	uint32_t headerItemMinorVersion = 0;
+	OTBMMemoryBudgetCheck memoryBudgetCheck;
+	// Borrowed for the duration of loadMap() only; never owned.
+	NodeFileReadHandle* progressSource = nullptr;
+};
+
+#endif

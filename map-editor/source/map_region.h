@@ -1,0 +1,199 @@
+//////////////////////////////////////////////////////////////////////
+// This file is part of Remere's Map Editor
+//////////////////////////////////////////////////////////////////////
+// Remere's Map Editor is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Remere's Map Editor is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+//////////////////////////////////////////////////////////////////////
+
+#ifndef RME_MAP_REGION_H
+#define RME_MAP_REGION_H
+
+#include "position.h"
+#include "map_chunk_revision.h"
+
+class Tile;
+class Floor;
+class BaseMap;
+
+class TileLocation {
+	TileLocation();
+
+public:
+	~TileLocation();
+
+	TileLocation(const TileLocation&) = delete;
+	TileLocation& operator=(const TileLocation&) = delete;
+
+protected:
+	Tile* tile;
+	Position position;
+	size_t spawn_count;
+	size_t waypoint_count;
+	size_t town_count;
+	HouseExitList* house_exits; // Any house exits pointing here
+	Floor* owningFloor = nullptr; // Non-owning: this location is embedded in Floor.
+
+public:
+	void markRenderChunkChanged(MapChunkChange change = MapChunkChange::Content);
+	void markTileReplacement(const Tile* oldTile, const Tile* newTile, MapChunkChange change = MapChunkChange::Content);
+	void markInstalledTileChanged(const Tile* candidate, MapChunkChange change);
+
+	// Access tile
+	// Can't set directly since that does not update tile count
+	Tile* get() {
+		return tile;
+	}
+	const Tile* get() const {
+		return tile;
+	}
+
+	int size() const;
+	bool empty() const;
+
+	Position getPosition() const {
+		return position;
+	}
+
+	int getX() const {
+		return position.x;
+	}
+	int getY() const {
+		return position.y;
+	}
+	int getZ() const {
+		return position.z;
+	}
+
+	size_t getSpawnCount() const {
+		return spawn_count;
+	}
+	void increaseSpawnCount() {
+		spawn_count++;
+		markRenderChunkChanged(MapChunkChange::Presentation);
+	}
+	void decreaseSpawnCount() {
+		spawn_count--;
+		markRenderChunkChanged(MapChunkChange::Presentation);
+	}
+	size_t getWaypointCount() const {
+		return waypoint_count;
+	}
+	void increaseWaypointCount() {
+		waypoint_count++;
+		markRenderChunkChanged(MapChunkChange::Presentation);
+	}
+	void decreaseWaypointCount() {
+		waypoint_count--;
+		markRenderChunkChanged(MapChunkChange::Presentation);
+	}
+	size_t getTownCount() const {
+		return town_count;
+	}
+	void increaseTownCount() {
+		town_count++;
+		markRenderChunkChanged(MapChunkChange::Presentation);
+	}
+	void decreaseTownCount() {
+		town_count--;
+		markRenderChunkChanged(MapChunkChange::Presentation);
+	}
+	HouseExitList* createHouseExits() {
+		if (house_exits) {
+			return house_exits;
+		}
+		return house_exits = newd HouseExitList;
+	}
+	HouseExitList* getHouseExits() {
+		return house_exits;
+	}
+
+	friend class Floor;
+	friend class QTreeNode;
+	friend class Waypoints;
+	friend class BaseMap;
+};
+
+class Floor {
+public:
+	static void* operator new(size_t size);
+	static void operator delete(void* ptr) noexcept;
+	static void* operator new(size_t size, const char* file, int line);
+	static void operator delete(void* ptr, const char* file, int line) noexcept;
+
+	Floor(int x, int y, int z, MapChunkRevisionTracker& tracker);
+	MapChunkRevision getRenderRevision() const {
+		return tracker.read(renderRevision);
+	}
+
+private:
+	MapChunkRevisionTracker& tracker;
+	MapChunkRevision renderRevision;
+	friend class TileLocation;
+
+public:
+	TileLocation locs[MAP_LAYERS];
+};
+
+// This is not a QuadTree, but a HexTree (16 child nodes to every node), so the name is abit misleading
+class QTreeNode {
+public:
+	QTreeNode(BaseMap& map);
+	virtual ~QTreeNode();
+
+	QTreeNode(const QTreeNode&) = delete;
+	QTreeNode& operator=(const QTreeNode&) = delete;
+
+	QTreeNode* getLeaf(int x, int y); // Might return nullptr
+	QTreeNode* getLeafForce(int x, int y); // Will never return nullptr, it will create the node if it's not there
+
+	// Coordinates are NOT relative
+	TileLocation* createTile(int x, int y, int z);
+	TileLocation* getTile(int x, int y, int z);
+	Tile* setTile(int x, int y, int z, Tile* tile, MapChunkChange change = MapChunkChange::Content);
+
+	Floor* createFloor(int x, int y, int z);
+	Floor* getFloor(uint32_t z) {
+		ASSERT(isLeaf);
+		return z < MAP_LAYERS ? array[z] : nullptr;
+	}
+	Floor** getFloors() {
+		return array;
+	}
+
+	void setVisible(bool underground, bool value);
+	void setVisible(uint32_t client, bool underground, bool value);
+	bool isVisible(uint32_t client, bool underground);
+	void clearVisible(uint32_t client);
+
+	bool isVisible(bool underground);
+
+protected:
+	BaseMap& map;
+	uint32_t visible;
+
+	bool isLeaf;
+	union {
+		QTreeNode* child[MAP_LAYERS];
+		Floor* array[MAP_LAYERS];
+		/*
+		#if 16 != MAP_LAYERS
+		#    error "You need to rewrite the QuadTree in order to handle more or less than 16 floors"
+		#endif
+		*/
+	};
+
+	friend class BaseMap;
+	friend class MapIterator;
+};
+
+#endif

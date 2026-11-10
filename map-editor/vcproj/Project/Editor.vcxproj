@@ -1,0 +1,884 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{7AA6C5AC-C8C4-40EF-A0B3-3569B9819163}</ProjectGuid>
+    <RootNamespace>Editor</RootNamespace>
+    <Keyword>Win32Proj</Keyword>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <ProjectName>Editor</ProjectName>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
+    <EnableUnitySupport>true</EnableUnitySupport>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
+    <EnableUnitySupport>true</EnableUnitySupport>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
+    <EnableUnitySupport>true</EnableUnitySupport>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
+    <EnableUnitySupport>true</EnableUnitySupport>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <_ProjectFileVersion>10.0.21006.1</_ProjectFileVersion>
+    <TargetName>NexaMap Editor</TargetName>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">$(SolutionDir)$(Configuration)\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">$(Configuration)\</IntDir>
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">false</LinkIncremental>
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</LinkIncremental>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">$(SolutionDir)$(Configuration)\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">$(Configuration)\</IntDir>
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">false</LinkIncremental>
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkIncremental>
+    <CodeAnalysisRuleSet Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">AllRules.ruleset</CodeAnalysisRuleSet>
+    <CodeAnalysisRuleSet Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">AllRules.ruleset</CodeAnalysisRuleSet>
+    <CodeAnalysisRules Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" />
+    <CodeAnalysisRules Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" />
+    <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" />
+    <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" />
+    <CodeAnalysisRuleSet Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">AllRules.ruleset</CodeAnalysisRuleSet>
+    <CodeAnalysisRuleSet Condition="'$(Configuration)|$(Platform)'=='Release|x64'">AllRules.ruleset</CodeAnalysisRuleSet>
+    <CodeAnalysisRules Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" />
+    <CodeAnalysisRules Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
+    <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" />
+    <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
+    <IncludePath Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">$(IncludePath)</IncludePath>
+    <IncludePath Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(IncludePath)</IncludePath>
+    <LibraryPath Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">$(LibraryPath)</LibraryPath>
+    <LibraryPath Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(LibraryPath)</LibraryPath>
+    <IncludePath Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">$(IncludePath)</IncludePath>
+    <IncludePath Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(IncludePath)</IncludePath>
+    <LibraryPath Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">$(LibraryPath)</LibraryPath>
+    <LibraryPath Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(LibraryPath)</LibraryPath>
+  </PropertyGroup>
+  <PropertyGroup Label="Vcpkg">
+    <VcpkgEnableManifest>true</VcpkgEnableManifest>
+    <!-- Same static triplets and CRT as CI, see cmake/WindowsBuilds.md. -->
+    <VcpkgUseStatic>true</VcpkgUseStatic>
+  </PropertyGroup>
+  <PropertyGroup>
+    <AppearancesProtoDir>$(ProjectDir)..\..\source\protobuf</AppearancesProtoDir>
+    <AppearancesProto>$(AppearancesProtoDir)\appearances.proto</AppearancesProto>
+    <AppearancesGeneratedDir>$(ProjectDir)$(IntDir)protobuf</AppearancesGeneratedDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <Optimization>Disabled</Optimization>
+      <AdditionalIncludeDirectories>$(AppearancesGeneratedDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_CRTDBG_MAP_ALLOC;__DEBUG__;PUGIXML_NO_XPATH;wxMSVC_VERSION_AUTO;__EXPERIMENTAL__;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <MinimalRebuild>true</MinimalRebuild>
+      <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <RuntimeTypeInfo>true</RuntimeTypeInfo>
+      <PrecompiledHeaderFile>main.h</PrecompiledHeaderFile>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <MaxFilesInUnityFile>8</MaxFilesInUnityFile>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalOptions>/FS /utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>comctl32.lib;Rpcrt4.lib;WS2_32.lib;shlwapi.lib;version.lib;uxtheme.lib;oleacc.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(SolutionDir)..\dependencies\vs\lib\</AdditionalLibraryDirectories>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <GenerateMapFile>true</GenerateMapFile>
+      <MapFileName>$(TargetName).map</MapFileName>
+      <MapExports>true</MapExports>
+      <SubSystem>Console</SubSystem>
+      <TargetMachine>MachineX86</TargetMachine>
+      <IgnoreSpecificDefaultLibraries>wxscintillad.lib</IgnoreSpecificDefaultLibraries>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <Optimization>Disabled</Optimization>
+      <AdditionalIncludeDirectories>$(AppearancesGeneratedDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_CRTDBG_MAP_ALLOC;__DEBUG__;PUGIXML_NO_XPATH;wxMSVC_VERSION_AUTO;__EXPERIMENTAL__;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <RuntimeTypeInfo>true</RuntimeTypeInfo>
+      <PrecompiledHeaderFile>main.h</PrecompiledHeaderFile>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <MaxFilesInUnityFile>8</MaxFilesInUnityFile>
+      <AdditionalOptions>/FS /bigobj /utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>comctl32.lib;Rpcrt4.lib;WS2_32.lib;shlwapi.lib;version.lib;uxtheme.lib;oleacc.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(SolutionDir)..\dependencies\vs\lib\</AdditionalLibraryDirectories>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <GenerateMapFile>true</GenerateMapFile>
+      <MapFileName>$(TargetName).map</MapFileName>
+      <MapExports>true</MapExports>
+      <SubSystem>Console</SubSystem>
+      <IgnoreSpecificDefaultLibraries>wxscintillad.lib</IgnoreSpecificDefaultLibraries>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <Optimization>Full</Optimization>
+      <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <AdditionalIncludeDirectories>$(AppearancesGeneratedDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>NDEBUG;__RELEASE__;PUGIXML_NO_XPATH;wxMSVC_VERSION_AUTO;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <ControlFlowGuard>Guard</ControlFlowGuard>
+      <SDLCheck>true</SDLCheck>
+      <DisableSpecificWarnings>4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <PrecompiledHeaderFile>main.h</PrecompiledHeaderFile>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <MaxFilesInUnityFile>8</MaxFilesInUnityFile>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalOptions>/FS -Zm114 /utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>comctl32.lib;Rpcrt4.lib;WS2_32.lib;shlwapi.lib;version.lib;uxtheme.lib;oleacc.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <SubSystem>Console</SubSystem>
+      <LargeAddressAware>true</LargeAddressAware>
+      <CETCompat>true</CETCompat>
+      <OptimizeReferences>true</OptimizeReferences>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <TargetMachine>MachineX86</TargetMachine>
+      <AdditionalLibraryDirectories>
+      </AdditionalLibraryDirectories>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <Optimization>Full</Optimization>
+      <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <AdditionalIncludeDirectories>$(AppearancesGeneratedDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>NDEBUG;__RELEASE__;PUGIXML_NO_XPATH;wxMSVC_VERSION_AUTO;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <ControlFlowGuard>Guard</ControlFlowGuard>
+      <SDLCheck>true</SDLCheck>
+      <DisableSpecificWarnings>4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <PrecompiledHeaderFile>main.h</PrecompiledHeaderFile>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <MaxFilesInUnityFile>8</MaxFilesInUnityFile>
+      <AdditionalOptions>/FS -Zm114 /utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalUsingDirectories>
+      </AdditionalUsingDirectories>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>comctl32.lib;Rpcrt4.lib;WS2_32.lib;shlwapi.lib;version.lib;uxtheme.lib;oleacc.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <SubSystem>Console</SubSystem>
+      <LargeAddressAware>true</LargeAddressAware>
+      <CETCompat>true</CETCompat>
+      <OptimizeReferences>true</OptimizeReferences>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <AdditionalLibraryDirectories>$(SolutionDir)..\dependencies\vs\lib\;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\..\source\add_item_window.cpp" />
+    <ClCompile Include="..\..\source\add_tileset_window.cpp" />
+    <ClCompile Include="..\..\source\artprovider.cpp" />
+    <ClCompile Include="..\..\source\autoborder_preview.cpp" />
+    <ClCompile Include="..\..\source\ingame_preview\ingame_preview_window.cpp" />
+    <ClCompile Include="..\..\source\ingame_preview\playtest_controller.cpp">
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\..\source\ingame_preview\playtest_map.cpp">
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\..\source\ingame_preview\playtest_weather.cpp">
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\..\source\ingame_preview\playtest_hud.cpp">
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\..\source\brush_tables.cpp" />
+    <ClCompile Include="..\..\source\container_properties_window.cpp" />
+    <ClCompile Include="..\..\source\find_item_window.cpp" />
+    <ClCompile Include="..\..\source\light_drawer.cpp" />
+    <ClCompile Include="..\..\source\replace_items_window.cpp" />
+    <ClCompile Include="..\..\source\replace_tool\advanced_replace_window.cpp" />
+    <ClCompile Include="..\..\source\replace_tool\quick_replace_selection_dialog.cpp" />
+    <ClCompile Include="..\..\source\replace_tool\quick_replace_selection_model.cpp" />
+    <ClCompile Include="..\..\source\replace_tool\replace_engine.cpp" />
+    <ClCompile Include="..\..\source\replace_tool\replace_execution_plan.cpp" />
+    <ClCompile Include="..\..\source\replace_tool\replace_item_grid_panel.cpp" />
+    <ClCompile Include="..\..\source\replace_tool\replace_library_catalog.cpp" />
+    <ClCompile Include="..\..\source\replace_tool\replace_library_panel.cpp" />
+    <ClCompile Include="..\..\source\replace_tool\replace_rule.cpp" />
+    <ClCompile Include="..\..\source\replace_tool\replace_rule_builder_panel.cpp" />
+    <ClCompile Include="..\..\source\replace_tool\replace_rule_editor.cpp" />
+    <ClCompile Include="..\..\source\replace_tool\replace_rule_manager.cpp" />
+    <ClCompile Include="..\..\source\replace_tool\replace_scope.cpp" />
+    <ClCompile Include="..\..\source\replace_tool\replace_visual_similarity_service.cpp" />
+    <ClCompile Include="..\..\source\replace_tool\visual_similarity_index.cpp" />
+    <ClCompile Include="..\..\source\tileset_window.cpp" />
+	<ClCompile Include="..\..\source\welcome_dialog.cpp" />
+	<ClCompile Include="..\..\source\server_workspace.cpp" />
+	<ClCompile Include="..\..\source\workspace_session.cpp" />
+	<ClCompile Include="..\..\source\unreachable_cleaner.cpp" />
+	<ClCompile Include="..\..\source\remove_unreachable_dialog.cpp" />
+	<ClCompile Include="..\..\source\map_backup.cpp" />
+    <ClInclude Include="..\..\source\add_item_window.h" />
+    <ClInclude Include="..\..\source\unreachable_cleaner.h" />
+    <ClInclude Include="..\..\source\remove_unreachable_dialog.h" />
+    <ClInclude Include="..\..\source\map_backup.h" />
+    <ClInclude Include="..\..\source\add_tileset_window.h" />
+    <ClInclude Include="..\..\source\artprovider.h" />
+    <ClInclude Include="..\..\source\autoborder_preview.h" />
+    <ClInclude Include="..\..\source\ingame_preview\ingame_preview_window.h" />
+    <ClInclude Include="..\..\source\ingame_preview\playtest_controller.h" />
+    <ClInclude Include="..\..\source\ingame_preview\playtest_input.h" />
+    <ClInclude Include="..\..\source\ingame_preview\playtest_map.h" />
+    <ClInclude Include="..\..\source\ingame_preview\playtest_weather.h" />
+    <ClInclude Include="..\..\source\ingame_preview\playtest_hud.h" />
+    <ClInclude Include="..\..\source\light_drawer.h" />
+    <ClInclude Include="..\..\source\main_toolbar.h" />
+    <ClInclude Include="..\..\source\otml.h" />
+    <ClInclude Include="..\..\source\browse_tile_window.h" />
+    <ClCompile Include="..\..\source\browse_tile_window.cpp" />
+    <ClInclude Include="..\..\source\border_workspace_window.h" />
+    <ClCompile Include="..\..\source\border_workspace_window.cpp" />
+    <ClInclude Include="..\..\source\border_learning_window.h" />
+    <ClCompile Include="..\..\source\border_learning_window.cpp" />
+    <ClInclude Include="..\..\source\materials_workbench_window.h" />
+    <ClCompile Include="..\..\source\materials_workbench_window.cpp">
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClInclude Include="..\..\source\reference_style.h" />
+    <ClCompile Include="..\..\source\reference_style.cpp" />
+    <ClInclude Include="..\..\source\reference_style_store.h" />
+    <ClCompile Include="..\..\source\reference_style_store.cpp" />
+    <ClInclude Include="..\..\source\reference_style_window.h" />
+    <ClCompile Include="..\..\source\reference_style_window.cpp" />
+    <ClInclude Include="..\..\source\map_item_id_converter_window.h" />
+    <ClCompile Include="..\..\source\map_item_id_converter_window.cpp" />
+    <ClInclude Include="..\..\source\map_migration\map_migration.h" />
+    <ClInclude Include="..\..\source\map_migration\migration_io.h" />
+    <ClInclude Include="..\..\source\map_migration\map_migration_window.h" />
+    <ClCompile Include="..\..\source\map_migration\migration_io.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="..\..\source\map_migration\classic_resource_catalog.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="..\..\source\map_migration\map_inventory.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="..\..\source\map_migration\cross_client_matcher.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="..\..\source\map_migration\map_migration_engine.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="..\..\source\map_migration\map_migration_window.cpp" />
+    <ClInclude Include="..\..\source\map_item_id_converter.h" />
+    <ClCompile Include="..\..\source\map_item_id_converter.cpp" />
+    <ClInclude Include="..\..\source\depot_conversion_validation.h" />
+    <ClCompile Include="..\..\source\depot_conversion_validation.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClInclude Include="..\..\source\item_id_mapping.h" />
+    <ClCompile Include="..\..\source\item_id_mapping.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClInclude Include="..\..\source\item_id_mapping_provider.h" />
+    <ClCompile Include="..\..\source\item_id_mapping_provider.cpp">
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClInclude Include="..\..\source\otb_item_id_mapping_provider.h" />
+    <ClCompile Include="..\..\source\otb_item_id_mapping_provider.cpp">
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClInclude Include="..\..\source\items_xml_id_converter.h" />
+    <ClCompile Include="..\..\source\items_xml_id_converter.cpp">
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClInclude Include="..\..\source\items_otb_id_converter.h" />
+    <ClCompile Include="..\..\source\items_otb_id_converter.cpp">
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClInclude Include="..\..\source\custom_server_converter.h" />
+    <ClCompile Include="..\..\source\custom_server_converter.cpp">
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClInclude Include="..\..\source\custom_server_converter_window.h" />
+    <ClCompile Include="..\..\source\custom_server_converter_window.cpp">
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClInclude Include="..\..\source\positionctrl.h" />
+    <ClCompile Include="..\..\source\main_toolbar.cpp" />
+    <ClCompile Include="..\..\source\positionctrl.cpp" />
+	<ClInclude Include="..\..\source\procedural_map_generator.h" />
+	<ClCompile Include="..\..\source\procedural_map_generator.cpp">
+	  <PrecompiledHeader>NotUsing</PrecompiledHeader>
+	  <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
+	  <IncludeInUnityFile>false</IncludeInUnityFile>
+	</ClCompile>
+	<ClInclude Include="..\..\source\procedural_map_generator_window.h" />
+	<ClCompile Include="..\..\source\procedural_map_generator_window.cpp">
+	  <IncludeInUnityFile>false</IncludeInUnityFile>
+	</ClCompile>
+    <ClInclude Include="..\..\source\carpet_brush.h" />
+    <ClCompile Include="..\..\source\carpet_brush.cpp" />
+    <ClInclude Include="..\..\source\common.h" />
+    <ClCompile Include="..\..\source\common.cpp" />
+    <ClInclude Include="..\..\source\container_properties_window.h" />
+    <ClInclude Include="..\..\source\con_vector.h" />
+    <ClInclude Include="..\..\source\creature_brush.h" />
+    <ClCompile Include="..\..\source\creature_brush.cpp" />
+    <ClInclude Include="..\..\source\dat_debug_view.h" />
+    <ClCompile Include="..\..\source\dat_debug_view.cpp" />
+    <ClInclude Include="..\..\source\definitions.h" />
+    <ClInclude Include="..\..\source\cross_client_match_policy.h" />
+    <ClInclude Include="..\..\source\editor_disposal.h" />
+    <ClInclude Include="..\..\source\lua_parser.h" />
+    <ClInclude Include="..\..\source\multiplayer_peer.h" />
+    <ClInclude Include="..\..\source\path_encoding.h" />
+    <ClInclude Include="..\..\source\profiling.h" />
+    <ClInclude Include="..\..\source\profiling_perf.h" />
+    <ClInclude Include="..\..\source\runtime_paths.h" />
+    <ClInclude Include="..\..\source\xml_attribute.h" />
+    <ClInclude Include="..\..\source\doodad_brush.h" />
+    <ClCompile Include="..\..\source\doodad_brush.cpp" />
+    <ClCompile Include="..\..\source\eraser_brush.cpp" />
+    <ClInclude Include="..\..\source\extension.h" />
+    <ClInclude Include="..\..\source\extension_window.h" />
+    <ClInclude Include="..\..\source\file_transaction.h" />
+    <ClInclude Include="..\..\source\filehandle.h" />
+    <ClInclude Include="..\..\source\iominimap.h" />
+    <ClInclude Include="..\..\source\minimap_format.h" />
+    <ClInclude Include="..\..\source\minimap_import.h" />
+    <ClInclude Include="..\..\source\minimap_import_window.h" />
+    <ClInclude Include="..\..\source\png_map_import.h" />
+    <ClInclude Include="..\..\source\png_map_import_window.h" />
+    <ClCompile Include="..\..\source\extension.cpp" />
+    <ClCompile Include="..\..\source\extension_window.cpp" />
+    <ClCompile Include="..\..\source\filehandle.cpp" />
+    <ClCompile Include="..\..\source\iominimap.cpp" />
+    <ClCompile Include="..\..\source\minimap_import.cpp" />
+    <ClCompile Include="..\..\source\minimap_import_window.cpp" />
+    <ClCompile Include="..\..\source\png_map_import.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\png_map_import_window.cpp">
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClInclude Include="..\..\source\ground_brush.h" />
+    <ClCompile Include="..\..\source\ground_brush.cpp" />
+    <ClInclude Include="..\..\source\house_brush.h" />
+    <ClCompile Include="..\..\source\house_brush.cpp" />
+    <ClInclude Include="..\..\source\house_exit_brush.h" />
+    <ClCompile Include="..\..\source\house_exit_brush.cpp" />
+    <ClInclude Include="..\..\source\map_allocator.h" />
+    <ClInclude Include="..\..\source\map_region.h" />
+    <ClInclude Include="..\..\source\map_chunk_revision.h" />
+    <ClInclude Include="..\..\source\map_chunk_geometry_cache.h" />
+    <ClInclude Include="..\..\source\map_chunk_render_cache.h" />
+    <ClInclude Include="..\..\source\atlas_page_epochs.h" />
+    <ClCompile Include="..\..\source\map_chunk_render_cache.cpp" />
+    <ClCompile Include="..\..\source\map_region.cpp" />
+    <ClInclude Include="..\..\source\object_pool.h" />
+    <ClCompile Include="..\..\source\object_pool.cpp" />
+    <ClInclude Include="..\..\source\mt_rand.h" />
+    <ClCompile Include="..\..\source\mt_rand.cpp"><IncludeInUnityFile>false</IncludeInUnityFile></ClCompile>
+    <ClInclude Include="..\..\source\numbertextctrl.h" />
+    <ClInclude Include="..\..\source\properties_window.h" />
+    <ClInclude Include="..\..\source\raw_brush.h" />
+    <ClCompile Include="..\..\source\numbertextctrl.cpp" />
+    <ClCompile Include="..\..\source\properties_window.cpp" />
+    <ClCompile Include="..\..\source\raw_brush.cpp" />
+    <ClInclude Include="..\..\source\replace_items_window.h" />
+    <ClInclude Include="..\..\source\replace_tool\advanced_replace_window.h" />
+    <ClInclude Include="..\..\source\replace_tool\quick_replace_selection_dialog.h" />
+    <ClInclude Include="..\..\source\replace_tool\quick_replace_selection_model.h" />
+    <ClInclude Include="..\..\source\replace_tool\replace_engine.h" />
+    <ClInclude Include="..\..\source\replace_tool\replace_execution_plan.h" />
+    <ClInclude Include="..\..\source\replace_tool\replace_item_grid_panel.h" />
+    <ClInclude Include="..\..\source\replace_tool\replace_library_catalog.h" />
+    <ClInclude Include="..\..\source\replace_tool\replace_library_panel.h" />
+    <ClInclude Include="..\..\source\replace_tool\replace_rule.h" />
+    <ClInclude Include="..\..\source\replace_tool\replace_rule_builder_panel.h" />
+    <ClInclude Include="..\..\source\replace_tool\replace_rule_editor.h" />
+    <ClInclude Include="..\..\source\replace_tool\replace_rule_manager.h" />
+    <ClInclude Include="..\..\source\replace_tool\replace_scope.h" />
+    <ClInclude Include="..\..\source\replace_tool\replace_visual_similarity_service.h" />
+    <ClInclude Include="..\..\source\replace_tool\visual_similarity_index.h" />
+    <ClInclude Include="..\..\source\rme_forward_declarations.h" />
+    <ClInclude Include="..\..\source\settings.h" />
+    <ClCompile Include="..\..\source\settings.cpp" />
+    <ClInclude Include="..\..\source\theme.h" />
+    <ClCompile Include="..\..\source\theme.cpp" />
+    <ClInclude Include="..\..\source\spawn_brush.h" />
+    <ClCompile Include="..\..\source\spawn_brush.cpp" />
+    <ClInclude Include="..\..\source\table_brush.h" />
+    <ClInclude Include="..\..\source\threads.h" />
+    <ClInclude Include="..\..\source\graphics.h" />
+    <ClCompile Include="..\..\source\graphics.cpp" />
+    <ClInclude Include="..\..\source\gl_renderer.h" />
+    <ClCompile Include="..\..\source\gl_renderer.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClInclude Include="..\..\source\border_learning.h" />
+    <ClCompile Include="..\..\source\border_learning.cpp" />
+    <ClCompile Include="..\..\source\border_learning_map.cpp" />
+    <ClInclude Include="..\..\source\post_process_renderer.h" />
+    <ClCompile Include="..\..\source\post_process_renderer.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClInclude Include="..\..\source\pngfiles.h" />
+    <ClInclude Include="..\..\source\sprites.h" />
+    <ClInclude Include="..\..\source\application.h" />
+    <ClCompile Include="..\..\source\application.cpp" />
+    <ClInclude Include="..\..\source\dcbutton.h" />
+    <ClCompile Include="..\..\source\dcbutton.cpp" />
+    <ClInclude Include="..\..\source\editor_tabs.h" />
+    <ClCompile Include="..\..\source\editor_tabs.cpp" />
+    <ClInclude Include="..\..\source\editor_resource_session.h" />
+    <ClCompile Include="..\..\source\editor_resource_session.cpp" />
+    <ClInclude Include="..\..\source\cross_client_clipboard.h" />
+    <ClCompile Include="..\..\source\cross_client_clipboard.cpp" />
+    <ClInclude Include="..\..\source\cross_client_paste_dialog.h" />
+    <ClCompile Include="..\..\source\cross_client_paste_dialog.cpp" />
+    <ClInclude Include="..\..\source\gui.h" />
+    <ClCompile Include="..\..\source\gui.cpp" />
+    <ClInclude Include="..\..\source\gui_ids.h" />
+    <ClInclude Include="..\..\source\hotkey_dialog.h" />
+    <ClCompile Include="..\..\source\hotkey_dialog.cpp" />
+    <ClInclude Include="..\..\source\hotkey_manager.h" />
+    <ClCompile Include="..\..\source\hotkey_manager.cpp" />
+    <ClInclude Include="..\..\source\quick_command_palette.h" />
+    <ClInclude Include="..\..\source\favorites_manager.h" />
+    <ClInclude Include="..\..\source\favorites_resources.h" />
+    <ClInclude Include="..\..\source\palette_favorites.h" />
+    <ClCompile Include="..\..\source\favorites_resources.cpp" />
+    <ClCompile Include="..\..\source\palette_favorites.cpp" />
+    <ClCompile Include="..\..\source\favorites_manager.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\quick_command_palette.cpp" />
+    <ClInclude Include="..\..\source\main_menubar.h" />
+    <ClCompile Include="..\..\source\main_menubar.cpp" />
+    <ClInclude Include="..\..\source\mcp\mcp_common.h" />
+    <ClInclude Include="..\..\source\mcp\mcp_context.h" />
+    <ClInclude Include="..\..\source\mcp\mcp_gui_call.h" />
+    <ClInclude Include="..\..\source\mcp\mcp_item_identity.h" />
+    <ClInclude Include="..\..\source\mcp\mcp_protocol.h" />
+    <ClInclude Include="..\..\source\mcp\mcp_registry.h" />
+    <ClInclude Include="..\..\source\mcp\mcp_server.h" />
+    <ClInclude Include="..\..\source\mcp\mcp_tool_utils.h" />
+    <ClInclude Include="..\..\source\mcp\mcp_tools_brush.h" />
+    <ClInclude Include="..\..\source\mcp\mcp_tools_edit.h" />
+    <ClInclude Include="..\..\source\mcp\mcp_tools_editor.h" />
+    <ClInclude Include="..\..\source\mcp\mcp_tools_entities.h" />
+    <ClInclude Include="..\..\source\mcp\mcp_tools_import_export.h" />
+    <ClInclude Include="..\..\source\mcp\mcp_tools_map.h" />
+    <ClInclude Include="..\..\source\mcp\mcp_tools_orientation.h" />
+    <ClInclude Include="..\..\source\mcp\mcp_tools_reference.h" />
+    <ClInclude Include="..\..\source\mcp\mcp_tools_render.h" />
+    <ClInclude Include="..\..\source\mcp\mcp_tools_region.h" />
+    <ClInclude Include="..\..\source\mcp\mcp_tools_search.h" />
+    <ClInclude Include="..\..\source\mcp\mcp_tools_validate.h" />
+    <ClInclude Include="..\..\source\mcp\mcp_window.h" />
+    <ClCompile Include="..\..\source\mcp\mcp_common.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\mcp\mcp_context.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\mcp\mcp_gui_call.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\mcp\mcp_item_identity.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\mcp\mcp_protocol.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\mcp\mcp_registry.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\mcp\mcp_server.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\mcp\mcp_tool_utils.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\mcp\mcp_tools_brush.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\mcp\mcp_tools_edit.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\mcp\mcp_tools_editor.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\mcp\mcp_tools_entities.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\mcp\mcp_tools_import_export.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\mcp\mcp_tools_map.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\mcp\mcp_tools_render.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\mcp\mcp_tools_region.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\mcp\mcp_tools_search.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\mcp\mcp_tools_validate.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\mcp\mcp_tools_orientation.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\mcp\mcp_tools_reference.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClCompile Include="..\..\source\mcp\mcp_window.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+    </ClCompile>
+    <ClInclude Include="..\..\source\map_diagnostics.h" />
+    <ClInclude Include="..\..\source\map_diagnostics_scanner.h" />
+    <ClInclude Include="..\..\source\map_diagnostics_window.h" />
+    <ClCompile Include="..\..\source\map_diagnostics.cpp" />
+    <ClCompile Include="..\..\source\map_diagnostics_scanner.cpp" />
+    <ClCompile Include="..\..\source\map_diagnostics_window.cpp" />
+    <ClInclude Include="..\..\source\map_tab.h" />
+    <ClCompile Include="..\..\source\map_tab.cpp" />
+    <ClInclude Include="..\..\source\new_map_tab_dialog.h" />
+    <ClCompile Include="..\..\source\new_map_tab_dialog.cpp" />
+    <ClInclude Include="..\..\source\minimap_window.h" />
+    <ClInclude Include="..\..\source\minimap_canvas.h" />
+    <ClInclude Include="..\..\source\minimap_style.h" />
+    <ClInclude Include="..\..\source\minimap_page_cache.h" />
+    <ClCompile Include="..\..\source\minimap_window.cpp" />
+    <ClCompile Include="..\..\source\minimap_canvas.cpp" />
+    <ClCompile Include="..\..\source\minimap_style.cpp" />
+    <ClCompile Include="..\..\source\minimap_page_cache.cpp" />
+    <ClInclude Include="..\..\source\process_com.h" />
+    <ClCompile Include="..\..\source\process_com.cpp" />
+    <ClInclude Include="..\..\source\palette_brushlist.h" />
+    <ClCompile Include="..\..\source\palette_brushlist.cpp" />
+    <ClInclude Include="..\..\source\palette_brush_tool.h" />
+    <ClCompile Include="..\..\source\palette_brush_tool.cpp" />
+    <ClInclude Include="..\..\source\palette_common.h" />
+    <ClCompile Include="..\..\source\palette_common.cpp" />
+    <ClInclude Include="..\..\source\palette_creature.h" />
+    <ClCompile Include="..\..\source\palette_creature.cpp" />
+    <ClInclude Include="..\..\source\palette_house.h" />
+    <ClCompile Include="..\..\source\palette_house.cpp" />
+    <ClInclude Include="..\..\source\palette_model.h" />
+    <ClCompile Include="..\..\source\palette_model.cpp" />
+    <ClInclude Include="..\..\source\palette_waypoints.h" />
+    <ClCompile Include="..\..\source\palette_waypoints.cpp" />
+    <ClInclude Include="..\..\source\palette_zones.h" />
+    <ClCompile Include="..\..\source\palette_zones.cpp" />
+    <ClInclude Include="..\..\source\palette_saved_terrain.h" />
+    <ClCompile Include="..\..\source\palette_saved_terrain.cpp" />
+    <ClInclude Include="..\..\source\terrain_stamp\terrain_stamp.h" />
+    <ClCompile Include="..\..\source\terrain_stamp\terrain_stamp.cpp" />
+    <ClInclude Include="..\..\source\terrain_stamp\terrain_stamp_library.h" />
+    <ClCompile Include="..\..\source\terrain_stamp\terrain_stamp_library.cpp" />
+    <ClInclude Include="..\..\source\palette_window.h" />
+    <ClCompile Include="..\..\source\palette_window.cpp" />
+    <ClInclude Include="..\..\source\about_window.h" />
+    <ClCompile Include="..\..\source\about_window.cpp" />
+    <ClInclude Include="..\..\source\common_windows.h" />
+    <ClCompile Include="..\..\source\common_windows.cpp" />
+    <ClInclude Include="..\..\source\preferences.h" />
+    <ClCompile Include="..\..\source\preferences.cpp" />
+    <ClInclude Include="..\..\source\old_properties_window.h" />
+    <ClCompile Include="..\..\source\old_properties_window.cpp" />
+    <ClInclude Include="..\..\source\result_window.h" />
+    <ClCompile Include="..\..\source\result_window.cpp" />
+    <ClInclude Include="..\..\source\map_display.h" />
+    <ClCompile Include="..\..\source\map_display.cpp" />
+    <ClInclude Include="..\..\source\map_drawer.h" />
+    <ClInclude Include="..\..\source\map_overlay_text.h" />
+    <ClCompile Include="..\..\source\map_drawer.cpp" />
+    <ClInclude Include="..\..\source\map_window.h" />
+    <ClInclude Include="..\..\source\viewport_metrics.h" />
+    <ClCompile Include="..\..\source\map_window.cpp" />
+    <ClInclude Include="..\..\source\action.h" />
+    <ClCompile Include="..\..\source\action.cpp" />
+    <ClInclude Include="..\..\source\house_paste_transaction.h" />
+    <ClInclude Include="..\..\source\session_id.h" />
+    <ClCompile Include="..\..\source\session_id.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClInclude Include="..\..\source\client_version.h" />
+    <ClCompile Include="..\..\source\client_version.cpp" />
+    <ClInclude Include="..\..\source\client_assets.h" />
+    <ClCompile Include="..\..\source\client_assets.cpp" />
+    <ClInclude Include="..\..\source\client_assets_manifest.h" />
+    <ClCompile Include="..\..\source\client_assets_manifest.cpp" />
+    <ClInclude Include="..\..\source\copybuffer.h" />
+    <ClCompile Include="..\..\source\copybuffer.cpp" />
+    <ClInclude Include="..\..\source\creatures.h" />
+    <ClCompile Include="..\..\source\creatures.cpp" />
+    <ClInclude Include="..\..\source\editor.h" />
+    <ClCompile Include="..\..\source\editor.cpp" />
+    <ClInclude Include="..\..\source\items.h" />
+    <ClCompile Include="..\..\source\items.cpp" />
+    <ClInclude Include="..\..\source\item_id_codec.h" />
+    <ClCompile Include="..\..\source\item_id_codec.cpp" />
+    <ClInclude Include="..\..\source\selection.h" />
+    <ClCompile Include="..\..\source\selection.cpp" />
+    <ClInclude Include="..\..\source\tileset_window.h" />
+    <ClCompile Include="..\..\source\table_brush.cpp" />
+    <ClInclude Include="..\..\source\brush.h" />
+    <ClCompile Include="..\..\source\brush.cpp" />
+    <ClInclude Include="..\..\source\brush_enums.h" />
+    <ClInclude Include="..\..\source\materials.h" />
+    <ClCompile Include="..\..\source\materials.cpp" />
+    <ClInclude Include="..\..\source\tileset.h" />
+    <ClCompile Include="..\..\source\tileset.cpp" />
+    <ClInclude Include="..\..\source\basemap.h" />
+    <ClCompile Include="..\..\source\basemap.cpp" />
+    <ClInclude Include="..\..\source\bitmap_font.h" />
+    <ClCompile Include="..\..\source\bitmap_font.cpp" />
+    <ClInclude Include="..\..\source\complexitem.h" />
+    <ClCompile Include="..\..\source\complexitem.cpp" />
+    <ClInclude Include="..\..\source\creature.h" />
+    <ClCompile Include="..\..\source\creature.cpp" />
+    <ClInclude Include="..\..\source\house.h" />
+    <ClCompile Include="..\..\source\house.cpp" />
+    <ClInclude Include="..\..\source\item.h" />
+    <ClCompile Include="..\..\source\item.cpp" />
+    <ClInclude Include="..\..\source\item_attributes.h" />
+    <ClCompile Include="..\..\source\item_attributes.cpp" />
+    <ClInclude Include="..\..\source\map.h" />
+    <ClCompile Include="..\..\source\map.cpp" />
+    <ClInclude Include="..\..\source\map_format.h" />
+    <ClCompile Include="..\..\source\map_format.cpp" />
+    <ClInclude Include="..\..\source\outfit.h" />
+    <ClInclude Include="..\..\source\position.h" />
+    <ClInclude Include="..\..\source\spawn.h" />
+    <ClCompile Include="..\..\source\spawn.cpp" />
+    <ClInclude Include="..\..\source\sprite_appearances.h" />
+    <ClInclude Include="..\..\source\sprite_preloader.h" />
+    <ClCompile Include="..\..\source\sprite_appearances.cpp" />
+    <ClCompile Include="..\..\source\sprite_preloader.cpp" />
+    <ClInclude Include="..\..\source\spawn_format.h" />
+    <ClCompile Include="..\..\source\spawn_format.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\..\source\spawn_format_map.cpp" />
+    <ClInclude Include="..\..\source\creature_cache.h" />
+    <ClCompile Include="..\..\source\creature_cache.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClInclude Include="..\..\source\spawn_source_remap.h" />
+    <ClCompile Include="..\..\source\spawn_source_remap.cpp" />
+    <ClCompile Include="..\..\source\spawn_source_remap_core.cpp" />
+    <ClInclude Include="..\..\source\spawn_export_window.h" />
+    <ClCompile Include="..\..\source\spawn_export_window.cpp" />
+    <ClInclude Include="..\..\source\spawn_converter_window.h" />
+    <ClCompile Include="..\..\source\spawn_converter_window.cpp" />
+    <ClInclude Include="..\..\source\spawn_xml_converter.h" />
+    <ClCompile Include="..\..\source\spawn_xml_converter.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\..\source\templatemap76-74.cpp" />
+    <ClCompile Include="..\..\source\templatemap81.cpp" />
+    <ClCompile Include="..\..\source\templatemap854.cpp" />
+    <ClInclude Include="..\..\source\templates.h" />
+    <ClInclude Include="..\..\source\tile.h" />
+    <ClCompile Include="..\..\source\tile.cpp" />
+    <ClInclude Include="..\..\source\town.h" />
+    <ClCompile Include="..\..\source\town.cpp" />
+    <ClInclude Include="..\..\source\wall_brush.h" />
+    <ClCompile Include="..\..\source\wall_brush.cpp" />
+    <ClInclude Include="..\..\source\waypoints.h" />
+    <ClCompile Include="..\..\source\waypoints.cpp" />
+    <ClInclude Include="..\..\source\iomap.h" />
+    <ClCompile Include="..\..\source\iomap.cpp" />
+    <ClInclude Include="..\..\source\iomap_otbm.h" />
+    <ClCompile Include="..\..\source\iomap_otbm.cpp" />
+    <ClInclude Include="..\..\source\main.h" />
+    <ClInclude Include="..\..\source\waypoint_brush.h" />
+    <ClCompile Include="..\..\source\waypoint_brush.cpp" />
+    <ClInclude Include="..\..\source\zone_brush.h" />
+    <ClCompile Include="..\..\source\zone_brush.cpp" />
+    <ClInclude Include="..\..\source\zones.h" />
+    <ClCompile Include="..\..\source\zones.cpp" />
+    <ClInclude Include="..\..\source\find_item_window.h" />
+	<ClInclude Include="..\..\source\welcome_dialog.h" />
+	<ClInclude Include="..\..\source\server_workspace.h" />
+	<ClInclude Include="..\..\source\workspace_session.h" />
+    <ClInclude Include="..\..\source\version_info.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\..\source\mkpch.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\..\source\pngfiles.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="Editor.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\NexaMap-Debug.cmd" />
+    <None Include="..\..\source\protobuf\appearances.proto" />
+    <ClCompile Include="$(AppearancesGeneratedDir)\appearances.pb.cc">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+      <DisableSpecificWarnings>4244;4251;4267;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\source\multiplayer_transport.h" />
+    <ClInclude Include="..\..\source\multiplayer_protocol.h" />
+    <ClCompile Include="..\..\source\multiplayer_transport.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\..\source\multiplayer_protocol.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClInclude Include="..\..\source\multiplayer_crypto.h" />
+    <ClCompile Include="..\..\source\multiplayer_crypto.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClInclude Include="..\..\source\multiplayer_codec.h" />
+    <ClCompile Include="..\..\source\multiplayer_codec.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClInclude Include="..\..\source\multiplayer_session.h" />
+    <ClCompile Include="..\..\source\multiplayer_session.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClInclude Include="..\..\source\multiplayer_window.h" />
+    <ClCompile Include="..\..\source\multiplayer_window.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <IncludeInUnityFile>false</IncludeInUnityFile>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+  <Target
+    Name="GenerateAppearancesProtobuf"
+    BeforeTargets="ClCompile"
+    DependsOnTargets="VcpkgInstallManifestDependencies"
+    Inputs="$(AppearancesProto)"
+    Outputs="$(AppearancesGeneratedDir)\appearances.pb.h;$(AppearancesGeneratedDir)\appearances.pb.cc">
+    <MakeDir Directories="$(AppearancesGeneratedDir)" />
+    <Error
+      Condition="!Exists('$(_ZVcpkgCurrentInstalledDir)tools\protobuf\protoc.exe')"
+      Text="protoc.exe was not found. Restore the vcpkg manifest dependencies before building the Editor project." />
+    <Exec
+      WorkingDirectory="$(AppearancesProtoDir)"
+      Command="&quot;$(_ZVcpkgCurrentInstalledDir)tools\protobuf\protoc.exe&quot; --proto_path=. --cpp_out=&quot;$(AppearancesGeneratedDir)&quot; appearances.proto" />
+  </Target>
+</Project>

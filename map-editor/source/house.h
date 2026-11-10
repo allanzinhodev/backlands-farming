@@ -1,0 +1,147 @@
+//////////////////////////////////////////////////////////////////////
+// This file is part of Remere's Map Editor
+//////////////////////////////////////////////////////////////////////
+// Remere's Map Editor is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Remere's Map Editor is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+//////////////////////////////////////////////////////////////////////
+
+#ifndef RME_HOUSE_H_
+#define RME_HOUSE_H_
+
+#include "position.h"
+#include "session_id.h"
+
+class Map;
+class Tile;
+class Door;
+
+class Houses;
+
+struct HouseSnapshot {
+	uint32_t id = 0;
+	int rent = 0;
+	uint32_t requiredReset = 0;
+	uint32_t clientid = 0;
+	int32_t beds = 0;
+	std::string name;
+	uint32_t townid = 0;
+	bool guildhall = false;
+	Position exit;
+
+	bool operator==(const HouseSnapshot&) const = default;
+};
+
+class House {
+public:
+	House(Map& map);
+	~House();
+
+	uint32_t getID() const {
+		return id;
+	}
+	SessionId getSessionId() const noexcept {
+		return sessionId;
+	}
+	void setID(uint32_t newId) {
+		this->id = newId;
+	}
+
+	void clean();
+	void addTile(Tile* tile);
+	void removeTile(Tile* tile);
+	// Drops a position from the house only. Tiles swapped out of the map are undo
+	// snapshots and must keep their house ID, so removeTile would corrupt them.
+	void forgetTile(const Position& position);
+	size_t size() const;
+	size_t tileCount() const {
+		return tiles.size();
+	}
+	const PositionList& getTilePositions() const {
+		return tiles;
+	}
+	std::string getDescription() const;
+	HouseSnapshot getSnapshot() const;
+	void applySnapshot(const HouseSnapshot& snapshot);
+
+	int rent;
+	uint32_t requiredReset;
+	uint32_t clientid;
+	int32_t beds;
+	// HouseDoorList doorList;
+	std::string name;
+	uint32_t townid;
+	bool guildhall;
+
+	void setExit(const Position& pos);
+	void setExit(Map* map, const Position& pos);
+	Position getExit() const {
+		return exit;
+	}
+	uint8_t getEmptyDoorID() const;
+	Position getDoorPositionByID(uint8_t id_) const;
+
+private:
+	const SessionId sessionId;
+	uint32_t id;
+
+protected:
+	Map* map;
+	PositionList tiles;
+	Position exit;
+
+	friend class Houses;
+};
+
+typedef std::map<uint32_t, House*> HouseMap;
+
+class Houses {
+public:
+	Houses(Map& map);
+	~Houses();
+
+	uint32_t count() const {
+		return houses.size();
+	}
+
+	HouseMap::iterator begin() {
+		return houses.begin();
+	}
+	HouseMap::iterator end() {
+		return houses.end();
+	}
+	HouseMap::const_iterator begin() const {
+		return houses.begin();
+	}
+	HouseMap::const_iterator end() const {
+		return houses.end();
+	}
+	// Removes only the registry entry. Used when ownership is transferred to
+	// another Houses collection; callers remain responsible for the pointer.
+	HouseMap::iterator erase(HouseMap::iterator iter) {
+		return houses.erase(iter);
+	}
+
+	void removeHouse(House* house_to_remove);
+	bool changeId(House* house, uint32_t newID);
+	bool addHouse(House* new_house);
+	House* getHouse(uint32_t houseid);
+	const House* getHouse(uint32_t houseid) const;
+	uint32_t getEmptyID();
+
+protected:
+	Map& map;
+	uint32_t max_house_id;
+	HouseMap houses;
+};
+
+#endif

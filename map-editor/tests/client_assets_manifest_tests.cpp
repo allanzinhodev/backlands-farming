@@ -1,0 +1,164 @@
+#include "client_assets_manifest.h"
+
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <string_view>
+
+namespace {
+	int failures = 0;
+
+	void check(bool condition, std::string_view name) {
+		if (!condition) {
+			std::cerr << "FAILED: " << name << '\n';
+			++failures;
+		}
+	}
+
+	void write(const std::filesystem::path& file, std::string_view content) {
+		std::ofstream stream(file, std::ios::binary | std::ios::trunc);
+		stream << content;
+	}
+
+	bool samePath(const std::filesystem::path& left, const std::filesystem::path& right) {
+		std::error_code leftError;
+		std::error_code rightError;
+		const std::filesystem::path canonicalLeft = std::filesystem::weakly_canonical(left, leftError);
+		const std::filesystem::path canonicalRight = std::filesystem::weakly_canonical(right, rightError);
+		return !leftError && !rightError && canonicalLeft == canonicalRight;
+	}
+}
+
+int main() {
+	const std::filesystem::path root = std::filesystem::temp_directory_path() / "nexamap-client-assets-manifest-tests";
+	std::error_code error;
+	std::filesystem::remove_all(root, error);
+
+	check(!ClientAssetsManifestLoader::Validate(root).valid, "missing root is rejected");
+	std::filesystem::create_directories(root / "assets");
+	check(!ClientAssetsManifestLoader::Validate(root).valid, "missing package and catalog are rejected");
+
+	write(root / "package.json", R"({"version":"14.12.0"})");
+	write(root / "assets.json", R"({"files":[]})");
+	write(root / "assets" / "catalog-content.json", R"([
+		{"type":"appearances","file":"appearances.dat"},
+		{"type":"sprite","file":"sheet.lzma","firstspriteid":0,"lastspriteid":143,"spritetype":0}
+	])");
+	write(root / "assets" / "appearances.dat", "");
+	write(root / "assets" / "sheet.lzma", "");
+	const ClientAssetsValidationResult valid = ClientAssetsManifestLoader::Validate(root);
+	check(valid.valid, "complete reference-compatible root is accepted");
+	check(valid.manifest.version == "14.12.0", "package version is retained");
+	check(valid.manifest.spriteSheets.size() == 1, "sprite sheet entry is retained");
+	check(valid.manifest.spriteSheets.front().firstSpriteId == 0, "official sprite range beginning at zero is accepted");
+	check(valid.manifest.warnings.size() == 1, "optional hash absence is a warning");
+
+	const std::filesystem::path otcRoot = root / "otc";
+	const std::filesystem::path otcAssets = otcRoot / "data" / "things" / "1525";
+	std::filesystem::create_directories(otcAssets);
+	write(otcAssets / "catalog-content.json", R"([
+		{"type":"appearances","file":"appearances.dat"},
+		{"type":"sprite","file":"sheet.lzma","firstspriteid":10,"lastspriteid":25,"spritetype":11}
+	])");
+	write(otcAssets / "appearances.dat", "");
+	write(otcAssets / "sheet.lzma", "");
+	const ClientAssetsValidationResult otc = ClientAssetsManifestLoader::Validate(otcRoot);
+	check(otc.valid, "OTC root with data/things/version is accepted");
+	check(otc.manifest.layout == ClientAssetsLayout::OtClient, "OTC layout is detected");
+	check(samePath(otc.manifest.assetsDirectory, otcAssets), "OTC version assets directory is resolved");
+	check(otc.manifest.version == "15.25 (OTC)", "OTC directory version is formatted");
+	check(ClientAssetsManifestLoader::Validate(otcAssets).valid, "OTC version directory can be selected directly");
+
+	const std::filesystem::path directOtcRoot = root / "otc-direct";
+	const std::filesystem::path directOtcAssets = directOtcRoot / "data" / "things";
+	std::filesystem::create_directories(directOtcAssets);
+	write(directOtcAssets / "catalog-content.json", R"([
+		{"type":"appearances","file":"appearances.dat"},
+		{"type":"sprite","file":"sheet.lzma","firstspriteid":30,"lastspriteid":45,"spritetype":11}
+	])");
+	write(directOtcAssets / "appearances.dat", "");
+	write(directOtcAssets / "sheet.lzma", "");
+	const ClientAssetsValidationResult directOtc = ClientAssetsManifestLoader::Validate(directOtcRoot);
+	check(directOtc.valid, "OTC root with direct data/things catalog is accepted");
+	check(directOtc.manifest.layout == ClientAssetsLayout::OtClient, "direct OTC layout is detected");
+	check(samePath(directOtc.manifest.assetsDirectory, directOtcAssets), "direct OTC assets directory is resolved");
+
+	const std::filesystem::path olderOtcAssets = directOtcAssets / "1500";
+	const std::filesystem::path newerOtcAssets = directOtcAssets / "1526";
+	for (const std::filesystem::path& versionAssets : { olderOtcAssets, newerOtcAssets }) {
+		std::filesystem::create_directories(versionAssets);
+		write(versionAssets / "catalog-content.json", R"([
+			{"type":"appearances","file":"appearances.dat"},
+			{"type":"sprite","file":"sheet.lzma","firstspriteid":50,"lastspriteid":65,"spritetype":11}
+		])");
+		write(versionAssets / "appearances.dat", "");
+		write(versionAssets / "sheet.lzma", "");
+	}
+	const ClientAssetsValidationResult preferredOtc = ClientAssetsManifestLoader::Validate(directOtcRoot);
+	check(preferredOtc.valid, "OTC root with direct and versioned catalogs is accepted");
+	check(samePath(preferredOtc.manifest.assetsDirectory, newerOtcAssets), "newest OTC version is preferred over direct catalog");
+	check(preferredOtc.manifest.version == "15.26 (OTC)", "preferred OTC version is retained");
+
+	const std::filesystem::path otc1530Assets = directOtcAssets / "1530";
+	std::filesystem::create_directories(otc1530Assets);
+	write(otc1530Assets / "catalog-content.json", R"([
+		{"type":"appearances","file":"appearances.dat"},
+		{"type":"sprite","file":"sheet14.lzma","firstspriteid":100,"lastspriteid":115,"spritetype":14},
+		{"type":"sprite","file":"sheet21.lzma","firstspriteid":200,"lastspriteid":208,"spritetype":21}
+	])");
+	write(otc1530Assets / "appearances.dat", "");
+	write(otc1530Assets / "sheet14.lzma", "");
+	write(otc1530Assets / "sheet21.lzma", "");
+	const ClientAssetsValidationResult otc1530 = ClientAssetsManifestLoader::Validate(otc1530Assets);
+	check(otc1530.valid, "OTC 1530 version assets directory with sprite types 14 and 21 is accepted");
+	check(otc1530.manifest.version == "15.30 (OTC)", "OTC 1530 directory version is formatted as 15.30 (OTC)");
+	check(otc1530.manifest.spriteSheets.size() == 2, "sprite sheets for types 14 and 21 are retained");
+
+	const std::filesystem::path nestedSubdir = otc1530Assets / "subfolder";
+	std::filesystem::create_directories(nestedSubdir);
+	write(nestedSubdir / "catalog-content.json", "[]");
+	const ClientAssetsValidationResult directWithSubdir = ClientAssetsManifestLoader::Validate(otc1530Assets);
+	check(directWithSubdir.valid, "direct OTC version with subfolder catalog is valid");
+	bool hasMultipleWarning = false;
+	for (const auto& w : directWithSubdir.manifest.warnings) {
+		if (w.find("Multiple OTC Assets versions") != std::string::npos) {
+			hasMultipleWarning = true;
+		}
+	}
+	check(!hasMultipleWarning, "direct OTC version selection does not produce multiple versions warning");
+	std::filesystem::remove_all(nestedSubdir, error);
+
+	// Test exceeding capacity for layout 14 (max 16) and 21 (max 9)
+	write(otc1530Assets / "catalog-content.json", R"([
+		{"type":"appearances","file":"appearances.dat"},
+		{"type":"sprite","file":"sheet14.lzma","firstspriteid":100,"lastspriteid":116,"spritetype":14}
+	])");
+	check(!ClientAssetsManifestLoader::Validate(otc1530Assets).valid, "sprite type 14 exceeding capacity 16 is rejected");
+
+	write(otc1530Assets / "catalog-content.json", R"([
+		{"type":"appearances","file":"appearances.dat"},
+		{"type":"sprite","file":"sheet21.lzma","firstspriteid":200,"lastspriteid":209,"spritetype":21}
+	])");
+	check(!ClientAssetsManifestLoader::Validate(otc1530Assets).valid, "sprite type 21 exceeding capacity 9 is rejected");
+
+	write(root / "assets" / "catalog-content.json", R"([
+		{"type":"appearances","file":"appearances.dat"},
+		{"type":"sprite","file":"sheet.lzma","firstspriteid":1,"lastspriteid":144,"spritetype":4}
+	])");
+	check(!ClientAssetsManifestLoader::Validate(root).valid, "unsupported sprite layout is rejected");
+
+	write(root / "assets" / "catalog-content.json", R"([
+		{"type":"appearances","file":"../outside.dat"},
+		{"type":"sprite","file":"sheet.lzma","firstspriteid":1,"lastspriteid":144,"spritetype":0}
+	])");
+	write(root / "outside.dat", "");
+	check(!ClientAssetsManifestLoader::Validate(root).valid, "catalog traversal outside assets is rejected");
+
+	std::filesystem::remove_all(root, error);
+	if (failures != 0) {
+		std::cerr << failures << " client Assets manifest test(s) failed.\n";
+		return 1;
+	}
+	std::cout << "Client Assets manifest tests passed.\n";
+	return 0;
+}

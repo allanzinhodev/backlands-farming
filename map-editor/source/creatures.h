@@ -1,0 +1,102 @@
+//////////////////////////////////////////////////////////////////////
+// This file is part of Remere's Map Editor
+//////////////////////////////////////////////////////////////////////
+// Remere's Map Editor is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Remere's Map Editor is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+//////////////////////////////////////////////////////////////////////
+
+#ifndef RME_CREATURES_H_
+#define RME_CREATURES_H_
+
+#include "outfit.h"
+
+#include <string>
+#include <map>
+#include <functional>
+#include <memory>
+
+class CreatureType;
+class CreatureBrush;
+
+class CreatureType {
+public:
+	CreatureType();
+	CreatureType(const CreatureType& ct);
+	CreatureType& operator=(const CreatureType& ct);
+	~CreatureType();
+
+	bool isNpc;
+	bool missing;
+	bool in_other_tileset;
+	bool standard;
+	std::string name;
+	Outfit outfit;
+	CreatureBrush* brush;
+
+	static CreatureType* loadFromXML(pugi::xml_node node, wxArrayString& warnings);
+	static CreatureType* loadFromOTXML(const FileName& filename, pugi::xml_document& node, wxArrayString& warnings);
+};
+
+typedef std::map<std::string, CreatureType*> CreatureMap;
+
+class CreatureDatabase {
+protected:
+	CreatureMap creature_map;
+
+public:
+	typedef CreatureMap::iterator iterator;
+	typedef CreatureMap::const_iterator const_iterator;
+
+	struct ImportedCreatureRecord {
+		std::string normalizedName;
+		std::string name;
+		bool isNpc = false;
+		Outfit outfit;
+	};
+	using ImportedCreatureList = std::vector<ImportedCreatureRecord>;
+
+	CreatureDatabase();
+	~CreatureDatabase();
+
+	void clear();
+	void swap(CreatureDatabase& other) noexcept;
+
+	CreatureType* operator[](const std::string& name);
+	CreatureType* addMissingCreatureType(const std::string& name, bool isNpc);
+	CreatureType* addCreatureType(const std::string& name, bool isNpc, const Outfit& outfit);
+	void applyWorkspaceCreature(std::unique_ptr<CreatureType> creatureType, bool standard = true);
+
+	bool hasMissing() const;
+	size_t size() const {
+		return creature_map.size();
+	}
+	iterator begin() {
+		return creature_map.begin();
+	}
+	iterator end() {
+		return creature_map.end();
+	}
+
+	using ImportProgress = std::function<void(const wxString&)>;
+	bool loadFromXML(const FileName& filename, bool standard, wxString& error, wxArrayString& warnings, const ImportProgress& progress = {});
+	bool importXMLFromOT(const FileName& filename, wxString& error, wxArrayString& warnings);
+	bool importLuaFromOT(const FileName& filename, wxString& error, wxArrayString& warnings);
+	bool importMonstersFromLuaDir(const wxString& directory, wxString& error, wxArrayString& warnings, const ImportProgress& progress = {}, bool updatePalettes = true, ImportedCreatureList* importedList = nullptr);
+	bool importNpcsFromLuaDir(const wxString& directory, wxString& error, wxArrayString& warnings, const ImportProgress& progress = {}, bool updatePalettes = true, ImportedCreatureList* importedList = nullptr);
+
+	bool saveToXML(const FileName& filename);
+};
+
+extern CreatureDatabase g_creatures;
+
+#endif

@@ -1,0 +1,119 @@
+//////////////////////////////////////////////////////////////////////
+// This file is part of Remere's Map Editor
+//////////////////////////////////////////////////////////////////////
+// Remere's Map Editor is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Remere's Map Editor is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+//////////////////////////////////////////////////////////////////////
+
+#ifndef RME_APPLICATION_H_
+#define RME_APPLICATION_H_
+
+#include "gui.h"
+#include "main_toolbar.h"
+#include "action.h"
+#include "settings.h"
+
+#include "process_com.h"
+#include "map_display.h"
+#include "welcome_dialog.h"
+
+class Item;
+class Creature;
+
+class MainFrame;
+class MapWindow;
+class wxEventLoopBase;
+class wxSingleInstanceChecker;
+
+class Application : public wxApp {
+public:
+	~Application() override;
+	bool OnInit() override;
+	void OnEventLoopEnter(wxEventLoopBase* loop) override;
+	virtual void MacOpenFiles(const wxArrayString& fileNames);
+	int OnExit() override;
+	int OnRun() override;
+	void Unload();
+	void ShutdownServices();
+	bool RequestApplicationRestart();
+	bool IsRestartRequested() const {
+		return m_restart_requested;
+	}
+
+private:
+	bool m_startup = false;
+	bool m_restart_requested = false;
+	wxString m_file_to_open;
+	void FixVersionDiscrapencies();
+	bool ParseCommandLineMap(wxString& fileName);
+
+	bool OnExceptionInMainLoop() override;
+	void OnUnhandledException() override;
+	void OnFatalException() override;
+
+#ifdef _USE_PROCESS_COM
+	RMEProcessServer* m_proc_server = nullptr;
+	wxSingleInstanceChecker* m_single_instance_checker = nullptr;
+#endif
+};
+
+wxDECLARE_APP(Application);
+
+class MainMenuBar;
+
+class MainFrame : public wxFrame {
+public:
+	MainFrame(const wxString& title, const wxPoint& pos, const wxSize& size);
+	~MainFrame() override;
+
+	void UpdateMenubar();
+	bool DoQuerySave(bool doclose = true);
+	bool DoQuerySaveTileset(bool doclose = true);
+	bool DoQueryImportCreatures();
+	bool LoadMap(const FileName& name);
+
+	void AddRecentFile(const FileName& file);
+	void LoadRecentFiles();
+	void SaveRecentFiles();
+	std::vector<wxString> GetRecentFiles();
+
+	MainToolBar* GetAuiToolBar() const {
+		return tool_bar;
+	}
+
+	MainMenuBar* GetMainMenuBar() const {
+		return menu_bar;
+	}
+
+	void OnUpdateMenus(wxCommandEvent& event);
+	void UpdateFloorMenu();
+	void OnIdle(wxIdleEvent& event);
+	void OnExit(wxCloseEvent& event);
+
+#ifdef __WINDOWS__
+	bool MSWTranslateMessage(WXMSG* msg) override;
+#endif
+
+	void PrepareDC(wxDC& dc) override;
+
+protected:
+	MainMenuBar* menu_bar;
+	MainToolBar* tool_bar;
+
+	friend class Application;
+	friend class GUI;
+
+	DECLARE_EVENT_TABLE()
+};
+
+#endif

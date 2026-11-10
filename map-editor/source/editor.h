@@ -1,0 +1,150 @@
+//////////////////////////////////////////////////////////////////////
+// This file is part of Remere's Map Editor
+//////////////////////////////////////////////////////////////////////
+// Remere's Map Editor is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Remere's Map Editor is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+//////////////////////////////////////////////////////////////////////
+
+#ifndef RME_EDITOR_H
+#define RME_EDITOR_H
+
+#include "item.h"
+#include "tile.h"
+#include "iomap.h"
+#include "map.h"
+
+#include "action.h"
+#include "selection.h"
+
+class BaseMap;
+class CopyBuffer;
+class MultiplayerSession;
+
+enum class EditorClientVersionPolicy {
+	DetectFromMap,
+	KeepLoaded,
+};
+
+class Editor {
+public:
+	Editor(CopyBuffer& copybuffer, const FileName& fn, EditorClientVersionPolicy clientVersionPolicy = EditorClientVersionPolicy::DetectFromMap, const ItemIdCodec* readCodec = nullptr, bool detachedDecodedView = false);
+	Editor(CopyBuffer& copybuffer);
+#ifdef NEXAMAP_MULTIPLAYER_TESTS
+	Editor(CopyBuffer& copybuffer, std::nullptr_t);
+#endif
+	~Editor();
+
+public:
+	// Public members
+	std::unique_ptr<ActionQueue> actionQueue;
+	Selection selection;
+	CopyBuffer& copybuffer;
+	GroundBrush* replace_brush;
+	Map map; // The map that is being edited
+	std::unique_ptr<MultiplayerSession> multiplayer;
+
+public: // Functions
+	static bool CanEdit() {
+		return true;
+	}
+
+	// Map handling
+	bool saveMap(const FileName& filename, bool showdialog); // "" means default filename
+
+	Map& getMap() noexcept {
+		return map;
+	}
+	const Map& getMap() const noexcept {
+		return map;
+	}
+	uint16_t getMapWidth() const {
+		return map.width;
+	}
+	uint16_t getMapHeight() const {
+		return map.height;
+	}
+
+	wxString getLoaderError() const {
+		return map.getError();
+	}
+	bool importMap(const FileName& filename, int import_x_offset, int import_y_offset, int import_z_offset, ImportType house_import_type, ImportType spawn_import_type);
+
+	// Adds an action to the action queue (this allows the user to undo the action)
+	// Invalidates the action pointer
+	void addBatch(BatchAction* action, int stacking_delay = 0);
+	void addAction(Action* action, int stacking_delay = 0);
+
+	// Selection
+	bool hasSelection() const {
+		return selection.size() != 0;
+	}
+	// Some simple actions that work on the map (these will work through the undo queue)
+	// Moves the selected area by the offset
+	void moveSelection(Position offset);
+	// Deletes all selected items
+	void destroySelection();
+	// Borderizes the selected region
+	void borderizeSelection();
+	// Randomizes the ground in the selected region
+	void randomizeSelection();
+
+	// Same as above although it applies to the entire map
+	// action queue is flushed when these functions are called
+	// showdialog is whether a progress bar should be shown
+	void borderizeMap(bool showdialog);
+	void randomizeMap(bool showdialog);
+	void clearInvalidHouseTiles(bool showdialog);
+	size_t removeEmptySpawns(bool showdialog);
+	void clearModifiedTileState(bool showdialog);
+
+	// Draw using the current brush to the target position
+	// alt is whether the ALT key is pressed
+	void draw(const Position& offset, bool alt);
+	void undraw(const Position& offset, bool alt);
+	void draw(const PositionVector& posvec, bool alt);
+	void draw(const PositionVector& todraw, PositionVector& toborder, bool alt);
+	void undraw(const PositionVector& posvec, bool alt);
+	void undraw(const PositionVector& todraw, PositionVector& toborder, bool alt);
+	// Apply all doodad anchors as one deterministic undo entry. The selected
+	// brush must be a doodad and its native preview buffer must be populated.
+	bool applyDoodadPositions(const PositionVector& positions, bool alt, bool draw, ActionIdentifier identifier = ACTION_MCP);
+
+protected:
+	void drawInternal(const Position offset, bool alt, bool dodraw);
+	void drawInternal(const PositionVector& posvec, bool alt, bool dodraw);
+	void drawInternal(const PositionVector& todraw, PositionVector& toborder, bool alt, bool dodraw);
+
+	Editor(const Editor&);
+	Editor& operator=(const Editor&);
+};
+
+inline void Editor::draw(const Position& offset, bool alt) {
+	drawInternal(offset, alt, true);
+}
+inline void Editor::undraw(const Position& offset, bool alt) {
+	drawInternal(offset, alt, false);
+}
+inline void Editor::draw(const PositionVector& posvec, bool alt) {
+	drawInternal(posvec, alt, true);
+}
+inline void Editor::draw(const PositionVector& todraw, PositionVector& toborder, bool alt) {
+	drawInternal(todraw, toborder, alt, true);
+}
+inline void Editor::undraw(const PositionVector& posvec, bool alt) {
+	drawInternal(posvec, alt, false);
+}
+inline void Editor::undraw(const PositionVector& todraw, PositionVector& toborder, bool alt) {
+	drawInternal(todraw, toborder, alt, false);
+}
+
+#endif

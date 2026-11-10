@@ -1,0 +1,75 @@
+//////////////////////////////////////////////////////////////////////
+// This file is part of Remere's Map Editor
+//////////////////////////////////////////////////////////////////////
+// Remere's Map Editor is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Remere's Map Editor is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+//////////////////////////////////////////////////////////////////////
+
+#ifndef RME_MATERIALS_H_
+#define RME_MATERIALS_H_
+
+#include "extension.h"
+#include <functional>
+
+class Materials {
+public:
+	Materials();
+	~Materials();
+
+	void clear();
+	void swap(Materials& other) noexcept;
+
+	const MaterialsExtensionList& getExtensions();
+
+	TilesetContainer tilesets;
+	// Query already resolved categories without creating empty ones or loading data.
+	static bool hasCollections(const TilesetContainer& tilesets);
+	bool hasCollections() const {
+		return hasCollections(tilesets);
+	}
+
+	bool loadMaterials(const FileName& identifier, wxString& error, wxArrayString& warnings, bool serverIdsToClientIds = false);
+	bool loadExtensions(const FileName& identifier, wxString& error, wxArrayString& warnings);
+	void createOtherTileset(const std::function<void(size_t, size_t)>& progress = {});
+	void addToTileset(const std::string& tilesetName, int itemId, TilesetCategoryType categoryType);
+
+	bool isInTileset(Item* item, const std::string& tileset) const;
+	bool isInTileset(Brush* brush, const std::string& tileset) const;
+	bool needSave() const {
+		return modified;
+	}
+
+	void modify(bool newValue = true) {
+		this->modified = newValue;
+	}
+
+protected:
+	bool loadMaterialsInternal(const FileName& identifier, wxString& error, wxArrayString& warnings, bool serverIdsToClientIds, std::set<wxString>& visited);
+	bool unserializeMaterials(const FileName& filename, pugi::xml_node node, wxString& error, wxArrayString& warnings, bool serverIdsToClientIds, std::set<wxString>& visited);
+	bool unserializeTileset(pugi::xml_node node, wxArrayString& warnings);
+
+	MaterialsExtensionList extensions;
+
+private:
+	bool modified = false;
+	// Cache signature of the last createOtherTileset() build, so we can skip the
+	// expensive full item-DB + creature rescan when nothing changed.
+	size_t other_tileset_creature_count = static_cast<size_t>(-1);
+	int32_t other_tileset_item_maxid = -1;
+	Materials(const Materials&);
+	Materials& operator=(const Materials&);
+};
+
+extern Materials g_materials;
+
+#endif
