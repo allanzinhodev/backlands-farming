@@ -1,0 +1,719 @@
+//////////////////////////////////////////////////////////////////////
+// This file is part of Remere's Map Editor
+//////////////////////////////////////////////////////////////////////
+// Remere's Map Editor is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Remere's Map Editor is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+//////////////////////////////////////////////////////////////////////
+
+#include "main.h"
+
+#include "copybuffer.h"
+#include "editor.h"
+#include "gui.h"
+#include "creature.h"
+#include "spawn_source_remap.h"
+
+#include <algorithm>
+#include <memory>
+#include <optional>
+
+namespace {
+	HouseSnapshot makeRecoveredHouseSnapshot(uint32_t houseId) {
+		HouseSnapshot recovered;
+		recovered.id = houseId;
+		recovered.name = "Recovered House #" + std::to_string(houseId);
+		return recovered;
+	}
+}
+
+CopyBuffer::CopyBuffer() :
+	tiles(std::make_unique<BaseMap>()),
+	sourceMapSessionId(InvalidSessionId) {
+	;
+}
+
+BaseMap& CopyBuffer::getBufferMap() {
+	ASSERT(tiles);
+	return *tiles;
+}
+
+CopyBuffer::~CopyBuffer() = default;
+
+void CopyBuffer::swap(CopyBuffer& other) noexcept {
+	std::swap(tiles, other.tiles);
+	std::swap(copyPos, other.copyPos);
+	std::swap(minimumPosition, other.minimumPosition);
+	std::swap(maximumPosition, other.maximumPosition);
+	std::swap(boundsValid, other.boundsValid);
+	std::swap(sourceMapSessionId, other.sourceMapSessionId);
+	std::swap(houses, other.houses);
+	std::swap(spawnDependencies, other.spawnDependencies);
+}
+
+Position CopyBuffer::getPosition() const {
+	ASSERT(tiles);
+	return copyPos;
+}
+
+void CopyBuffer::clear() {
+	tiles.reset();
+	sourceMapSessionId = InvalidSessionId;
+	houses.clear();
+	zoneNames.clear();
+	spawnDependencies.clear();
+	resetBounds();
+}
+
+void CopyBuffer::replace(std::unique_ptr<BaseMap> map, const Position& position) {
+	SpawnDependencyMap dependencies;
+	if (map) {
+		dependencies = CaptureSpawnDependencies(*map);
+	}
+	replace(std::move(map), position, std::move(dependencies));
+}
+
+void CopyBuffer::replace(std::unique_ptr<BaseMap> map, const Position& position, SpawnDependencyMap dependencies) {
+	clear();
+	tiles = std::move(map);
+	copyPos = position;
+	spawnDependencies = std::move(dependencies);
+	rebuildBounds();
+}
+
+void CopyBuffer::resetBounds() {
+	minimumPosition = Position();
+	maximumPosition = Position();
+	boundsValid = false;
+}
+
+void CopyBuffer::includePosition(const Position& position) {
+	if (!boundsValid) {
+		minimumPosition = position;
+		maximumPosition = position;
+		boundsValid = true;
+		return;
+	}
+	minimumPosition.x = std::min(minimumPosition.x, position.x);
+	minimumPosition.y = std::min(minimumPosition.y, position.y);
+	minimumPosition.z = std::min(minimumPosition.z, position.z);
+	maximumPosition.x = std::max(maximumPosition.x, position.x);
+	maximumPosition.y = std::max(maximumPosition.y, position.y);
+	maximumPosition.z = std::max(maximumPosition.z, position.z);
+}
+
+void CopyBuffer::rebuildBounds() {
+	resetBounds();
+	if (!tiles) {
+		return;
+	}
+	for (MapIterator iterator = tiles->begin(); iterator != tiles->end(); ++iterator) {
+		includePosition((*iterator)->getPosition());
+	}
+}
+
+void CopyBuffer::captureHouse(const Map& map, uint32_t houseId) {
+	if (houseId == 0 || houses.find(houseId) != houses.end()) {
+		return;
+	}
+
+	if (const House* house = map.houses.getHouse(houseId)) {
+		houses.emplace(houseId, house->getSnapshot());
+		return;
+	}
+
+	// Keep an invalid/orphaned source tile usable without discarding its house
+	// identity. The destination receives a real, editable placeholder House.
+	houses.emplace(houseId, makeRecoveredHouseSnapshot(houseId));
+}
+
+void CopyBuffer::captureZones(const Map& map, const Tile& tile) {
+	for (unsigned int zoneId : tile.zones) {
+		zoneNames.try_emplace(zoneId, map.zones.getZoneName(zoneId));
+	}
+}
+
+HouseSnapshot CopyBuffer::getHouseSnapshot(uint32_t houseId) const {
+	auto it = houses.find(houseId);
+	if (it != houses.end()) {
+		return it->second;
+	}
+
+	return makeRecoveredHouseSnapshot(houseId);
+}
+
+void CopyBuffer::copy(Editor& editor, int floor) {
+	if (editor.selection.size() == 0) {
+		g_gui.SetStatusText("No tiles to copy.");
+		return;
+	}
+
+	clear();
+	tiles = std::make_unique<BaseMap>();
+	sourceMapSessionId = editor.map.getSessionId();
+
+	int tile_count = 0;
+	int item_count = 0;
+	copyPos = Position(0xFFFF, 0xFFFF, floor);
+
+	for (auto it = editor.selection.begin(); it != editor.selection.end(); ++it) {
+		++tile_count;
+
+		Tile* tile = *it;
+		TileLocation* newlocation = tiles->createTileL(tile->getPosition());
+		Tile* copied_tile = tiles->allocator(newlocation);
+
+		if (tile->ground && tile->ground->isSelected()) {
+			copied_tile->house_id = tile->house_id;
+			copied_tile->setMapFlags(tile->getMapFlags());
+			copied_tile->zones = tile->zones;
+		}
+		captureHouse(editor.map, copied_tile->getHouseID());
+		captureZones(editor.map, *copied_tile);
+
+		ItemVector tile_selection = tile->getSelectedItems();
+		for (auto iit = tile_selection.begin(); iit != tile_selection.end(); ++iit) {
+			++item_count;
+			// Copy items to copybuffer
+			copied_tile->addItem((*iit)->deepCopy());
+		}
+
+		if (tile->creature && tile->creature->isSelected()) {
+			copied_tile->creature = tile->creature->deepCopy();
+		}
+		if (tile->spawn && tile->spawn->isSelected()) {
+			copied_tile->spawn = tile->spawn->deepCopy();
+		}
+
+		tiles->setTile(copied_tile);
+		includePosition(copied_tile->getPosition());
+
+		if (copied_tile->getX() < copyPos.x) {
+			copyPos.x = copied_tile->getX();
+		}
+
+		if (copied_tile->getY() < copyPos.y) {
+			copyPos.y = copied_tile->getY();
+		}
+	}
+
+	std::ostringstream ss;
+	ss << "Copied " << tile_count << " tile" << (tile_count > 1 ? "s" : "") << " (" << item_count << " item" << (item_count > 1 ? "s" : "") << ")";
+	g_gui.SetStatusText(wxstr(ss.str()));
+
+	// Capture spawn dependencies so paste can remap Creature::spawn_source.
+	spawnDependencies = CaptureSpawnDependencies(*tiles, &editor.map);
+
+	g_gui.CaptureCrossClientCopy(*this);
+}
+
+void CopyBuffer::copyRegion(Editor& editor, const Position& from, const Position& to) {
+	clear();
+	tiles = std::make_unique<BaseMap>();
+	sourceMapSessionId = editor.map.getSessionId();
+	copyPos = from;
+
+	for (int y = from.y; y <= to.y; ++y) {
+		for (int x = from.x; x <= to.x; ++x) {
+			const Position position(x, y, from.z);
+			Tile* source = editor.map.getTile(position);
+			if (!source) {
+				continue;
+			}
+			TileLocation* location = tiles->createTileL(position);
+			Tile* copied = source->deepCopy(*tiles);
+			copied->setLocation(location);
+			tiles->setTile(position, copied);
+			captureHouse(editor.map, copied->getHouseID());
+			captureZones(editor.map, *copied);
+			includePosition(position);
+		}
+	}
+	spawnDependencies = CaptureSpawnDependencies(*tiles, &editor.map);
+	g_gui.CaptureCrossClientCopy(*this);
+}
+
+void CopyBuffer::cut(Editor& editor, int floor) {
+	if (editor.selection.size() == 0) {
+		g_gui.SetStatusText("No tiles to cut.");
+		return;
+	}
+
+	clear();
+	tiles = std::make_unique<BaseMap>();
+	sourceMapSessionId = editor.map.getSessionId();
+
+	int tile_count = 0;
+	int item_count = 0;
+	copyPos = Position(0xFFFF, 0xFFFF, floor);
+
+	BatchAction* batch = editor.actionQueue->createBatch(ACTION_CUT_TILES);
+	Action* action = editor.actionQueue->createAction(batch);
+
+	PositionList tilestoborder;
+
+	for (auto it = editor.selection.begin(); it != editor.selection.end(); ++it) {
+		tile_count++;
+
+		Tile* tile = *it;
+		Tile* newtile = tile->deepCopy(editor.map);
+		// The buffer outlives the map it was cut from, so it needs its own location.
+		Tile* copied_tile = tiles->allocator(tiles->createTileL(tile->getPosition()));
+
+		if (tile->ground && tile->ground->isSelected()) {
+			copied_tile->house_id = newtile->house_id;
+			newtile->house_id = 0;
+			copied_tile->zones = tile->zones;
+			copied_tile->setMapFlags(tile->getMapFlags());
+			newtile->setMapFlags(TILESTATE_NONE);
+			newtile->removeZones();
+		}
+		captureHouse(editor.map, copied_tile->getHouseID());
+		captureZones(editor.map, *copied_tile);
+
+		ItemVector tile_selection = newtile->popSelectedItems();
+		for (auto iit = tile_selection.begin(); iit != tile_selection.end(); ++iit) {
+			item_count++;
+			// Add items to copybuffer
+			copied_tile->addItem(*iit);
+		}
+
+		if (newtile->creature && newtile->creature->isSelected()) {
+			copied_tile->creature = newtile->creature;
+			newtile->creature = nullptr;
+		}
+
+		if (newtile->spawn && newtile->spawn->isSelected()) {
+			copied_tile->spawn = newtile->spawn;
+			newtile->spawn = nullptr;
+		}
+
+		tiles->setTile(copied_tile->getPosition(), copied_tile);
+		includePosition(copied_tile->getPosition());
+
+		if (copied_tile->getX() < copyPos.x) {
+			copyPos.x = copied_tile->getX();
+		}
+
+		if (copied_tile->getY() < copyPos.y) {
+			copyPos.y = copied_tile->getY();
+		}
+
+		if (g_settings.getInteger(Config::USE_AUTOMAGIC)) {
+			for (int y = -1; y <= 1; y++) {
+				for (int x = -1; x <= 1; x++) {
+					tilestoborder.push_back(Position(tile->getX() + x, tile->getY() + y, tile->getZ()));
+				}
+			}
+		}
+		action->addChange(newd Change(newtile));
+	}
+
+	batch->addAndCommitAction(action);
+
+	// Remove duplicates
+	tilestoborder.sort();
+	tilestoborder.unique();
+
+	if (g_settings.getInteger(Config::USE_AUTOMAGIC)) {
+		action = editor.actionQueue->createAction(batch);
+		for (auto it = tilestoborder.begin(); it != tilestoborder.end(); ++it) {
+			TileLocation* location = editor.map.createTileL(*it);
+			if (location->get()) {
+				Tile* new_tile = location->get()->deepCopy(editor.map);
+				new_tile->borderize(&editor.map);
+				new_tile->wallize(&editor.map);
+				action->addChange(newd Change(new_tile));
+			} else {
+				Tile* new_tile = editor.map.allocator(location);
+				new_tile->borderize(&editor.map);
+				if (new_tile->size()) {
+					action->addChange(newd Change(new_tile));
+				} else {
+					delete new_tile;
+				}
+			}
+		}
+
+		batch->addAndCommitAction(action);
+	}
+
+	editor.addBatch(batch);
+	std::stringstream ss;
+	ss << "Cut out " << tile_count << " tile" << (tile_count > 1 ? "s" : "") << " (" << item_count << " item" << (item_count > 1 ? "s" : "") << ")";
+	g_gui.SetStatusText(wxstr(ss.str()));
+
+	// Capture spawn dependencies so paste can remap Creature::spawn_source.
+	spawnDependencies = CaptureSpawnDependencies(*tiles, &editor.map);
+
+	g_gui.CaptureCrossClientCopy(*this);
+}
+
+void CopyBuffer::paste(Editor& editor, const Position& toPosition) {
+	if (!tiles) {
+		return;
+	}
+
+	const uint64_t totalTiles = tiles->size();
+	const bool showProgress = totalTiles >= 4096;
+	std::unique_ptr<ScopedLoadingBar> progress;
+	if (showProgress) {
+		progress = std::make_unique<ScopedLoadingBar>(wxString::Format("Preparing large paste (%llu tiles)...", static_cast<unsigned long long>(totalTiles)));
+		ScopedLoadingBar::SetLoadScale(0, 65);
+	}
+
+	constexpr size_t ActionChunkSize = 1024;
+	BatchAction* batchAction = editor.actionQueue->createBatch(ACTION_PASTE_TILES);
+	std::set<uint32_t> pasted_house_ids;
+	for (MapIterator it = tiles->begin(); it != tiles->end(); ++it) {
+		Tile* buffer_tile = (*it)->get();
+		const Position pos = buffer_tile->getPosition() - copyPos + toPosition;
+		if (pos.isValid() && buffer_tile->isHouseTile()) {
+			pasted_house_ids.insert(buffer_tile->getHouseID());
+		}
+	}
+
+	std::map<uint32_t, uint32_t> house_id_map;
+	const bool same_map = sourceMapSessionId != InvalidSessionId && sourceMapSessionId == editor.map.getSessionId();
+	bool created_houses = false;
+	for (uint32_t old_house_id : pasted_house_ids) {
+		if (same_map && editor.map.houses.getHouse(old_house_id)) {
+			house_id_map.emplace(old_house_id, old_house_id);
+			continue;
+		}
+
+		uint32_t new_house_id = old_house_id;
+		if (editor.map.houses.getHouse(new_house_id)) {
+			new_house_id = editor.map.houses.getEmptyID();
+		}
+
+		HouseSnapshot snapshot = getHouseSnapshot(old_house_id);
+		snapshot.id = new_house_id;
+		if (snapshot.exit != Position()) {
+			snapshot.exit = snapshot.exit - copyPos + toPosition;
+			if (!snapshot.exit.isValid()) {
+				snapshot.exit = Position();
+			}
+		}
+
+		// Commit each registry entry immediately. Besides guaranteeing that every
+		// House exists before tile changes run, this reserves the chosen id so the
+		// next conflicting House gets a different getEmptyID() result.
+		Action* house_action = editor.actionQueue->createAction(batchAction);
+		house_action->addChange(Change::CreateHouse(snapshot));
+		if (!batchAction->addAndCommitAction(house_action)) {
+			batchAction->rollback();
+			delete batchAction;
+			g_gui.SetStatusText("Paste cancelled: unable to create all required Houses.");
+			return;
+		}
+		house_id_map.emplace(old_house_id, new_house_id);
+		created_houses = true;
+	}
+
+	std::map<unsigned int, unsigned int> zone_id_map;
+	if (!same_map) {
+		for (const auto& [old_zone_id, zone_name] : zoneNames) {
+			if (zone_name.empty()) {
+				continue;
+			}
+			if (editor.map.zones.hasZone(zone_name)) {
+				zone_id_map.emplace(old_zone_id, editor.map.zones.getZoneID(zone_name));
+				continue;
+			}
+			const unsigned int new_zone_id = editor.map.zones.hasZone(old_zone_id) ? editor.map.zones.getEmptyID() : old_zone_id;
+			Action* zone_action = editor.actionQueue->createAction(batchAction);
+			zone_action->addChange(Change::CreateZone(zone_name, new_zone_id, true));
+			if (!batchAction->addAndCommitAction(zone_action)) {
+				batchAction->rollback();
+				delete batchAction;
+				g_gui.SetStatusText("Paste cancelled: unable to create all required zones.");
+				return;
+			}
+			zone_id_map.emplace(old_zone_id, new_zone_id);
+		}
+	}
+
+	Action* action = editor.actionQueue->createAction(batchAction);
+	std::set<Position> requiredSpawnCenters;
+	std::set<Position> pastedSpawnCenters;
+	uint64_t processedTiles = 0;
+	uint64_t pastedTiles = 0;
+	for (MapIterator it = tiles->begin(); it != tiles->end(); ++it) {
+		++processedTiles;
+		if (showProgress && processedTiles % 256 == 0) {
+			const int percentage = static_cast<int>(std::min<uint64_t>(99, processedTiles * 100 / std::max<uint64_t>(1, totalTiles)));
+			ScopedLoadingBar::SetLoadDone(percentage, wxString::Format("Preparing destination tiles (%llu / %llu)...", static_cast<unsigned long long>(processedTiles), static_cast<unsigned long long>(totalTiles)));
+		}
+		Tile* buffer_tile = (*it)->get();
+		Position pos = buffer_tile->getPosition() - copyPos + toPosition;
+
+		if (!pos.isValid()) {
+			continue;
+		}
+
+		TileLocation* location = editor.map.createTileL(pos);
+		Tile* copy_tile = buffer_tile->deepCopy(editor.map);
+		std::optional<Position> requiredSpawnCenter;
+
+		// Remap creature spawn_source to the translated position.
+		// Without this, SpawnMapAdapter::Capture() silently skips the
+		// creature because its spawn_source still points to the
+		// original (pre-paste) center position.
+		if (copy_tile->creature && copy_tile->creature->hasSpawnSource()) {
+			const bool remapped = RemapSingleCreatureSpawnSource(
+				*copy_tile->creature,
+				copyPos,
+				toPosition,
+				spawnDependencies
+			);
+			if (!remapped || !copy_tile->creature->getSpawnSource().isValid()) {
+				delete copy_tile->creature;
+				copy_tile->creature = nullptr;
+			} else {
+				requiredSpawnCenter = copy_tile->creature->getSpawnSource();
+			}
+		}
+
+		if (copy_tile->isHouseTile()) {
+			auto remap = house_id_map.find(copy_tile->getHouseID());
+			if (remap == house_id_map.end()) {
+				delete copy_tile;
+				continue;
+			}
+			copy_tile->setHouseID(remap->second);
+		}
+		if (!zone_id_map.empty() && copy_tile->hasZone()) {
+			std::set<unsigned int> remapped_zones;
+			for (unsigned int zone_id : copy_tile->zones) {
+				auto remap = zone_id_map.find(zone_id);
+				remapped_zones.insert(remap == zone_id_map.end() ? zone_id : remap->second);
+			}
+			copy_tile->zones = std::move(remapped_zones);
+		}
+		Tile* old_dest_tile = location->get();
+		Tile* new_dest_tile = nullptr;
+		copy_tile->setLocation(location);
+
+		if (g_settings.getInteger(Config::MERGE_PASTE) || !copy_tile->ground) {
+			if (old_dest_tile) {
+				new_dest_tile = old_dest_tile->deepCopy(editor.map);
+				if (new_dest_tile->spawn && copy_tile->spawn) {
+					auto* mergedSpawn = new_dest_tile->spawn->deepCopy();
+					MergeSpawnMetadata(*mergedSpawn, *copy_tile->spawn);
+					if (copy_tile->spawn->isSelected()) {
+						mergedSpawn->select();
+					}
+					delete copy_tile->spawn;
+					copy_tile->spawn = mergedSpawn;
+				}
+			} else {
+				new_dest_tile = editor.map.allocator(location);
+			}
+			new_dest_tile->merge(copy_tile);
+			delete copy_tile;
+		} else {
+			// If the copied tile has ground, replace target tile
+			new_dest_tile = copy_tile;
+		}
+
+		// Add all surrounding tiles to the map, so they get borders
+		editor.map.createTile(pos.x - 1, pos.y - 1, pos.z);
+		editor.map.createTile(pos.x, pos.y - 1, pos.z);
+		editor.map.createTile(pos.x + 1, pos.y - 1, pos.z);
+		editor.map.createTile(pos.x - 1, pos.y, pos.z);
+		editor.map.createTile(pos.x + 1, pos.y, pos.z);
+		editor.map.createTile(pos.x - 1, pos.y + 1, pos.z);
+		editor.map.createTile(pos.x, pos.y + 1, pos.z);
+		editor.map.createTile(pos.x + 1, pos.y + 1, pos.z);
+
+		action->addChange(newd Change(new_dest_tile));
+		if (requiredSpawnCenter) {
+			requiredSpawnCenters.insert(*requiredSpawnCenter);
+		}
+		if (buffer_tile->spawn) {
+			pastedSpawnCenters.insert(pos);
+		}
+		++pastedTiles;
+		if (action->size() >= ActionChunkSize) {
+			if (!batchAction->addAndCommitAction(action)) {
+				batchAction->rollback();
+				delete batchAction;
+				g_gui.SetStatusText("Paste cancelled: unable to commit destination tiles.");
+				return;
+			}
+			action = editor.actionQueue->createAction(batchAction);
+		}
+	}
+	// Dependent spawns are built from the tile in the map, so pasted tiles have to
+	// be in place first or the spawn's change would overwrite them.
+	if (!requiredSpawnCenters.empty() && action->size() != 0) {
+		if (!batchAction->addAndCommitAction(action)) {
+			batchAction->rollback();
+			delete batchAction;
+			g_gui.SetStatusText("Paste cancelled: unable to commit destination tiles.");
+			return;
+		}
+		action = editor.actionQueue->createAction(batchAction);
+	}
+	EnsureDependentSpawnsExist(
+		editor,
+		*action,
+		copyPos,
+		toPosition,
+		spawnDependencies,
+		requiredSpawnCenters,
+		pastedSpawnCenters
+	);
+	if (action->size() != 0) {
+		if (!batchAction->addAndCommitAction(action)) {
+			batchAction->rollback();
+			delete batchAction;
+			g_gui.SetStatusText("Paste cancelled: unable to commit spawn dependencies.");
+			return;
+		}
+	} else {
+		delete action;
+	}
+	if (batchAction->size() == 0) {
+		delete batchAction;
+		g_gui.SetStatusText("Nothing was pasted because the complete area is outside the valid map bounds.");
+		return;
+	}
+
+	if (g_settings.getInteger(Config::USE_AUTOMAGIC) && g_settings.getInteger(Config::BORDERIZE_PASTE)) {
+		if (showProgress) {
+			ScopedLoadingBar::SetLoadScale(65, 90);
+			ScopedLoadingBar::SetLoadDone(1, "Updating borders around the pasted area...");
+		}
+		action = editor.actionQueue->createAction(batchAction);
+		TileList borderize_tiles;
+		Map& map = editor.map;
+
+		// Go through all modified (selected) tiles (might be slow)
+		for (MapIterator it = tiles->begin(); it != tiles->end(); ++it) {
+			bool add_me = false; // If this tile is touched
+			Position pos = (*it)->getPosition() - copyPos + toPosition;
+			if (pos.z < 0 || pos.z >= MAP_LAYERS) {
+				continue;
+			}
+			// Go through all neighbours
+			Tile* t;
+			t = map.getTile(pos.x - 1, pos.y - 1, pos.z);
+			if (t && !t->isSelected()) {
+				borderize_tiles.push_back(t);
+				add_me = true;
+			}
+			t = map.getTile(pos.x, pos.y - 1, pos.z);
+			if (t && !t->isSelected()) {
+				borderize_tiles.push_back(t);
+				add_me = true;
+			}
+			t = map.getTile(pos.x + 1, pos.y - 1, pos.z);
+			if (t && !t->isSelected()) {
+				borderize_tiles.push_back(t);
+				add_me = true;
+			}
+			t = map.getTile(pos.x - 1, pos.y, pos.z);
+			if (t && !t->isSelected()) {
+				borderize_tiles.push_back(t);
+				add_me = true;
+			}
+			t = map.getTile(pos.x + 1, pos.y, pos.z);
+			if (t && !t->isSelected()) {
+				borderize_tiles.push_back(t);
+				add_me = true;
+			}
+			t = map.getTile(pos.x - 1, pos.y + 1, pos.z);
+			if (t && !t->isSelected()) {
+				borderize_tiles.push_back(t);
+				add_me = true;
+			}
+			t = map.getTile(pos.x, pos.y + 1, pos.z);
+			if (t && !t->isSelected()) {
+				borderize_tiles.push_back(t);
+				add_me = true;
+			}
+			t = map.getTile(pos.x + 1, pos.y + 1, pos.z);
+			if (t && !t->isSelected()) {
+				borderize_tiles.push_back(t);
+				add_me = true;
+			}
+			if (add_me) {
+				borderize_tiles.push_back(map.getTile(pos));
+			}
+		}
+		// Remove duplicates
+		borderize_tiles.sort();
+		borderize_tiles.unique();
+
+		uint64_t processedBorders = 0;
+		const uint64_t totalBorders = borderize_tiles.size();
+		for (Tile* tile : borderize_tiles) {
+			++processedBorders;
+			if (showProgress && processedBorders % 256 == 0) {
+				const int percentage = static_cast<int>(std::min<uint64_t>(99, processedBorders * 100 / std::max<uint64_t>(1, totalBorders)));
+				ScopedLoadingBar::SetLoadDone(percentage, wxString::Format("Updating paste borders (%llu / %llu)...", static_cast<unsigned long long>(processedBorders), static_cast<unsigned long long>(totalBorders)));
+			}
+			if (tile) {
+				Tile* newTile = tile->deepCopy(editor.map);
+				newTile->borderize(&map);
+
+				if (tile->ground && tile->ground->isSelected()) {
+					newTile->selectGround();
+				}
+
+				newTile->wallize(&map);
+				action->addChange(newd Change(newTile));
+			}
+		}
+
+		// Commit changes to map
+		if (action->size() != 0) {
+			if (!batchAction->addAndCommitAction(action)) {
+				batchAction->rollback();
+				delete batchAction;
+				g_gui.SetStatusText("Paste cancelled: unable to commit border updates.");
+				return;
+			}
+		} else {
+			delete action;
+		}
+	}
+
+	if (showProgress) {
+		ScopedLoadingBar::SetLoadScale(90, 99);
+		ScopedLoadingBar::SetLoadDone(1, "Finalizing large paste...");
+	}
+	editor.addBatch(batchAction);
+	g_gui.SetStatusText(wxString::Format("Pasted %llu tiles successfully.", static_cast<unsigned long long>(pastedTiles)));
+	if (created_houses) {
+		g_gui.RefreshPalettes(nullptr, true, false);
+	}
+}
+
+bool CopyBuffer::canPaste() const {
+	return tiles && tiles->size() != 0;
+}
+
+uint64_t CopyBuffer::getTileCount() const {
+	return tiles ? tiles->size() : 0;
+}
+
+bool CopyBuffer::getBounds(Position& minimum, Position& maximum) const {
+	if (!boundsValid) {
+		return false;
+	}
+	minimum = minimumPosition;
+	maximum = maximumPosition;
+	return true;
+}

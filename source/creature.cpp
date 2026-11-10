@@ -1,0 +1,81 @@
+//////////////////////////////////////////////////////////////////////
+// This file is part of Remere's Map Editor
+//////////////////////////////////////////////////////////////////////
+// Remere's Map Editor is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Remere's Map Editor is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+//////////////////////////////////////////////////////////////////////
+
+#include "main.h"
+
+#include "creature.h"
+
+#include <utility>
+
+Creature::Creature(const CreatureType* ctype) :
+	direction(SOUTH), spawntime(0), weight(0), saved(false), selected(false) {
+	if (ctype) {
+		type_name = ctype->name;
+	}
+}
+
+Creature::Creature(std::string ctype_name) :
+	type_name(std::move(ctype_name)), direction(SOUTH), spawntime(0), weight(0), saved(false), selected(false) {
+	////
+}
+
+Creature::~Creature() {
+	////
+}
+
+std::string Creature::DirID2Name(uint16_t id) {
+	switch (id) {
+		case NORTH:
+			return "North";
+		case EAST:
+			return "East";
+		case SOUTH:
+			return "South";
+		case WEST:
+			return "West";
+		default:
+			return "Unknown";
+	}
+}
+
+Creature* Creature::deepCopy() const {
+	auto* copy = newd Creature(type_name);
+	copy->spawntime = spawntime;
+	copy->weight = weight;
+	copy->direction = direction;
+	copy->selected = selected;
+	copy->saved = saved;
+	copy->spawn_weight_explicit = spawn_weight_explicit;
+	copy->spawn_direction_explicit = spawn_direction_explicit;
+	copy->spawn_type_override = spawn_type_override;
+	copy->spawn_is_npc = spawn_is_npc;
+	copy->has_spawn_source = has_spawn_source;
+	copy->spawn_source = spawn_source;
+	copy->spawn_attributes = spawn_attributes;
+	copy->alternative_kind = alternative_kind;
+	copy->spawn_alternatives = spawn_alternatives;
+	return copy;
+}
+
+const Outfit& Creature::getLookType() const {
+	CreatureType const* type = g_creatures[type_name];
+	if (type) {
+		return type->outfit;
+	}
+	static const Outfit otfi; // Empty outfit
+	return otfi;
+}

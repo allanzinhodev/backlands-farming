@@ -1,0 +1,620 @@
+//////////////////////////////////////////////////////////////////////
+// This file is part of Remere's Map Editor
+//////////////////////////////////////////////////////////////////////
+// Remere's Map Editor is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Remere's Map Editor is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+//////////////////////////////////////////////////////////////////////
+
+#include "main.h"
+
+#include "gui.h" // loadbar
+
+#include "map.h"
+
+Map::Map() :
+	BaseMap(),
+	sessionId(CreateSessionId()),
+	width(512),
+	height(512),
+	houses(*this),
+	has_changed(false),
+	unnamed(false),
+	waypoints(*this) {
+	// Earliest version possible
+	// Caller is responsible for converting us to proper version
+	mapVersion.otbm = MAP_OTBM_1;
+	mapVersion.client = CLIENT_VERSION_NONE;
+}
+
+Map::~Map() {
+	////
+}
+
+bool Map::open(const std::string& file, const ItemIdCodec* itemIdCodec) {
+	if (file == filename) {
+		return true; // Do not reopen ourselves!
+	}
+
+	tilecount = 0;
+	// The unique-id index describes the map being replaced. Both current callers
+	// pass a freshly constructed Map, so this is unreachable today, but the reset
+	// belongs next to the tilecount reset that is already here.
+	uidRefCount.clear();
+
+	IOMapOTBM maploader(getVersion());
+	maploader.useItemIdCodec(itemIdCodec);
+
+	bool success = maploader.loadMap(*this, wxstr(file));
+
+	mapVersion = maploader.version;
+
+	warnings = maploader.getWarnings();
+
+	if (!success) {
+		error = maploader.getError();
+		return false;
+	}
+
+	has_changed = false;
+
+	wxFileName fn = wxstr(file);
+	filename = fn.GetFullPath().mb_str(wxConvUTF8);
+	name = fn.GetFullName().mb_str(wxConvUTF8);
+
+	return true;
+}
+
+bool Map::convert(MapVersion to, bool showdialog) {
+	if (mapVersion.client == to.client) {
+		// Only OTBM version differs
+		// No changes necessary
+		mapVersion = to;
+		return true;
+	}
+
+	/* TODO
+
+	if(to.otbm == MAP_OTBM_4 && to.client < CLIENT_VERSION_850)
+		return false;
+
+	if(mapVersion.client >= CLIENT_VERSION_760 && to.client < CLIENT_VERSION_760)
+		convert(getReplacementMapFrom760To740(), showdialog);
+
+	if(mapVersion.client < CLIENT_VERSION_810 && to.client >= CLIENT_VERSION_810)
+		convert(getReplacementMapFrom800To810(), showdialog);
+
+	if(mapVersion.client == CLIENT_VERSION_854_BAD && to.client >= CLIENT_VERSION_854)
+		convert(getReplacementMapFrom854To854(), showdialog);
+	*/
+	mapVersion = to;
+
+	return true;
+}
+
+bool Map::convert(const ConversionMap& rm, bool showdialog) {
+	MapChunkRevisionTracker::Batch chunkBatch(getChunkRevisionTracker());
+	if (showdialog) {
+		g_gui.CreateLoadBar("Converting map ...");
+	}
+
+	uint64_t tiles_done = 0;
+	std::vector<uint16_t> id_list;
+
+	// std::ofstream conversions("converted_items.txt");
+
+	for (MapIterator miter = begin(); miter != end(); ++miter) {
+		Tile* tile = (*miter)->get();
+		ASSERT(tile);
+
+		if (tile->size() == 0) {
+			continue;
+		}
+
+		// id_list try MTM conversion
+		id_list.clear();
+
+		if (tile->ground) {
+			id_list.push_back(tile->ground->getID());
+		}
+		for (ItemVector::const_iterator item_iter = tile->items.begin(); item_iter != tile->items.end(); ++item_iter) {
+			if ((*item_iter)->isBorder()) {
+				id_list.push_back((*item_iter)->getID());
+			}
+		}
+
+		std::sort(id_list.begin(), id_list.end());
+
+		auto cfmtm = rm.mtm.end();
+
+		while (id_list.size()) {
+			cfmtm = rm.mtm.find(id_list);
+			if (cfmtm != rm.mtm.end()) {
+				break;
+			}
+			id_list.pop_back();
+		}
+
+		// Keep track of how many items have been inserted at the bottom
+		size_t inserted_items = 0;
+
+		if (cfmtm != rm.mtm.end()) {
+			tile->markRenderChunkChanged();
+			const std::vector<uint16_t>& v = cfmtm->first;
+
+			if (tile->ground && std::find(v.begin(), v.end(), tile->ground->getID()) != v.end()) {
+				delete tile->ground;
+				tile->ground = nullptr;
+			}
+
+			for (auto item_iter = tile->items.begin(); item_iter != tile->items.end();) {
+				if (std::find(v.begin(), v.end(), (*item_iter)->getID()) != v.end()) {
+					delete *item_iter;
+					item_iter = tile->items.erase(item_iter);
+				} else {
+					++item_iter;
+				}
+			}
+
+			const std::vector<uint16_t>& new_items = cfmtm->second;
+			for (auto iit = new_items.begin(); iit != new_items.end(); ++iit) {
+				Item* item = Item::Create(*iit);
+				if (item->isGroundTile()) {
+					tile->ground = item;
+				} else {
+					tile->items.insert(tile->items.begin(), item);
+					++inserted_items;
+				}
+			}
+		}
+
+		if (tile->ground) {
+			auto cfstm = rm.stm.find(tile->ground->getID());
+			if (cfstm != rm.stm.end()) {
+				tile->markRenderChunkChanged();
+				uint16_t aid = tile->ground->getActionID();
+				uint16_t uid = tile->ground->getUniqueID();
+				delete tile->ground;
+				tile->ground = nullptr;
+
+				const std::vector<uint16_t>& v = cfstm->second;
+				// conversions << "Converted " << tile->getX() << ":" << tile->getY() << ":" << tile->getZ() << " " << id << " -> ";
+				for (auto iit = v.begin(); iit != v.end(); ++iit) {
+					Item* item = Item::Create(*iit);
+					// conversions << *iit << " ";
+					if (item->isGroundTile()) {
+						item->setActionID(aid);
+						item->setUniqueID(uid);
+						tile->addItem(item);
+					} else {
+						tile->items.insert(tile->items.begin(), item);
+						++inserted_items;
+					}
+				}
+				// conversions << std::endl;
+			}
+		}
+
+		for (auto replace_item_iter = tile->items.begin() + inserted_items; replace_item_iter != tile->items.end();) {
+			uint16_t id = (*replace_item_iter)->getID();
+			auto cf = rm.stm.find(id);
+			if (cf != rm.stm.end()) {
+				tile->markRenderChunkChanged();
+				// uint16_t aid = (*replace_item_iter)->getActionID();
+				// uint16_t uid = (*replace_item_iter)->getUniqueID();
+				delete *replace_item_iter;
+
+				replace_item_iter = tile->items.erase(replace_item_iter);
+				const std::vector<uint16_t>& v = cf->second;
+				for (auto iit = v.begin(); iit != v.end(); ++iit) {
+					replace_item_iter = tile->items.insert(replace_item_iter, Item::Create(*iit));
+					// conversions << "Converted " << tile->getX() << ":" << tile->getY() << ":" << tile->getZ() << " " << id << " -> " << *iit << std::endl;
+					++replace_item_iter;
+				}
+			} else {
+				++replace_item_iter;
+			}
+		}
+
+		++tiles_done;
+		if (showdialog && tiles_done % 0x10000 == 0) {
+			g_gui.SetLoadDone(int(tiles_done / double(getTileCount()) * 100.0));
+		}
+	}
+
+	if (showdialog) {
+		g_gui.DestroyLoadBar();
+	}
+
+	return true;
+}
+
+void Map::cleanInvalidTiles(bool showdialog) {
+	MapChunkRevisionTracker::Batch chunkBatch(getChunkRevisionTracker());
+	if (showdialog) {
+		g_gui.CreateLoadBar("Removing invalid tiles...");
+	}
+
+	uint64_t tiles_done = 0;
+
+	for (MapIterator miter = begin(); miter != end(); ++miter) {
+		Tile* tile = (*miter)->get();
+		ASSERT(tile);
+
+		if (tile->size() == 0) {
+			continue;
+		}
+
+		for (auto item_iter = tile->items.begin(); item_iter != tile->items.end();) {
+			if (g_items.typeExists((*item_iter)->getID())) {
+				++item_iter;
+			} else {
+				tile->markRenderChunkChanged();
+				delete *item_iter;
+				item_iter = tile->items.erase(item_iter);
+			}
+		}
+
+		++tiles_done;
+		if (showdialog && tiles_done % 0x10000 == 0) {
+			g_gui.SetLoadDone(int(tiles_done / double(getTileCount()) * 100.0));
+		}
+	}
+
+	if (showdialog) {
+		g_gui.DestroyLoadBar();
+	}
+}
+
+Position Map::getZonePosition(unsigned int zoneId) {
+	Position pos;
+	for (MapIterator miter = begin(); miter != end(); ++miter) {
+		Tile* tile = (*miter)->get();
+		ASSERT(tile);
+
+		if (tile->size() == 0) {
+			continue;
+		}
+
+		if (tile->zones.find(zoneId) != tile->zones.end()) {
+			pos = tile->getPosition();
+			break;
+		}
+	}
+	return pos;
+}
+
+void Map::convertHouseTiles(uint32_t fromId, uint32_t toId) {
+	MapChunkRevisionTracker::Batch chunkBatch(getChunkRevisionTracker());
+	g_gui.CreateLoadBar("Converting house tiles...");
+	uint64_t tiles_done = 0;
+
+	for (MapIterator miter = begin(); miter != end(); ++miter) {
+		Tile* tile = (*miter)->get();
+		ASSERT(tile);
+
+		uint32_t houseId = tile->getHouseID();
+		if (houseId == 0 || houseId != fromId) {
+			continue;
+		}
+
+		tile->setHouseID(toId);
+		++tiles_done;
+		if (tiles_done % 0x10000 == 0) {
+			g_gui.SetLoadDone(int(tiles_done / double(getTileCount()) * 100.0));
+		}
+	}
+
+	g_gui.DestroyLoadBar();
+}
+
+namespace {
+	template <typename Callback>
+	void forEachUniqueId(const Item* item, const Callback& callback) {
+		if (!item) {
+			return;
+		}
+		if (const uint16_t uid = item->getUniqueID(); uid != 0) {
+			callback(uid);
+		}
+		if (const auto* container = dynamic_cast<const Container*>(item)) {
+			for (const Item* child : container->getVector()) {
+				forEachUniqueId(child, callback);
+			}
+		}
+	}
+
+	template <typename Callback>
+	void forEachUniqueId(const Tile* tile, const Callback& callback) {
+		if (!tile) {
+			return;
+		}
+		forEachUniqueId(tile->ground, callback);
+		for (const Item* item : tile->items) {
+			forEachUniqueId(item, callback);
+		}
+	}
+}
+
+void Map::updateUniqueIds(Tile* old_tile, Tile* new_tile) {
+	// Reads the items, not TILESTATE_UNIQUE: swapTile runs before Tile::update on a new tile.
+	forEachUniqueId(old_tile, [this](uint16_t uid) { removeUniqueId(uid); });
+	forEachUniqueId(new_tile, [this](uint16_t uid) { addUniqueId(uid); });
+}
+
+void Map::addUniqueId(uint16_t uid) {
+	if (uid == 0) {
+		return;
+	}
+	if (uidRefCount.empty()) {
+		uidRefCount.assign(std::numeric_limits<uint16_t>::max() + 1, 0);
+	}
+	++uidRefCount[uid];
+}
+
+void Map::removeUniqueId(uint16_t uid) {
+	if (uid == 0 || uidRefCount.empty()) {
+		return;
+	}
+	if (uidRefCount[uid] > 0) {
+		--uidRefCount[uid];
+	}
+}
+
+bool Map::hasUniqueId(uint16_t uid) const {
+	if (uid == 0 || uidRefCount.empty()) {
+		return false;
+	}
+
+	return uidRefCount[uid] != 0;
+}
+
+MapVersion Map::getVersion() const {
+	return mapVersion;
+}
+
+bool Map::hasChanged() const {
+	return has_changed;
+}
+
+bool Map::doChange() {
+	bool doupdate = !has_changed;
+	has_changed = true;
+	++changeGeneration;
+	return doupdate;
+}
+
+bool Map::clearChanges() {
+	bool doupdate = has_changed;
+	has_changed = false;
+	return doupdate;
+}
+
+bool Map::hasFile() const {
+	return filename != "";
+}
+
+void Map::setWidth(int new_width) {
+	if (new_width > 65000) {
+		width = 65000;
+	} else if (new_width < 64) {
+		width = 64;
+	} else {
+		width = new_width;
+	}
+}
+
+void Map::setHeight(int new_height) {
+	if (new_height > 65000) {
+		height = 65000;
+	} else if (new_height < 64) {
+		height = 64;
+	} else {
+		height = new_height;
+	}
+}
+void Map::setMapDescription(const std::string& new_description) {
+	description = new_description;
+}
+
+void Map::setHouseFilename(const std::string& new_housefile) {
+	housefile = new_housefile;
+	unnamed = false;
+}
+
+void Map::setSpawnFilename(const std::string& new_spawnfile) {
+	spawnfile = new_spawnfile;
+	unnamed = false;
+}
+
+void Map::setZoneFilename(const std::string& new_zonefile) {
+	zonefile = new_zonefile;
+	unnamed = false;
+}
+
+bool Map::addSpawn(Tile* tile) {
+	Spawn* spawn = tile->spawn;
+	if (spawn) {
+		// Coordinates past the map edge would wrap in the QTree; removeSpawnInternal clips the same way.
+		int z = tile->getZ();
+		int start_x = std::max(tile->getX() - spawn->getSize(), 0);
+		int start_y = std::max(tile->getY() - spawn->getSize(), 0);
+		int end_x = std::min(tile->getX() + spawn->getSize(), MAP_MAX_WIDTH);
+		int end_y = std::min(tile->getY() + spawn->getSize(), MAP_MAX_HEIGHT);
+
+		for (int y = start_y; y <= end_y; ++y) {
+			for (int x = start_x; x <= end_x; ++x) {
+				TileLocation* ctile_loc = createTileL(x, y, z);
+				ctile_loc->increaseSpawnCount();
+			}
+		}
+		spawns.addSpawn(tile);
+		return true;
+	}
+	return false;
+}
+
+void Map::removeSpawnInternal(Tile* tile) {
+	Spawn* spawn = tile->spawn;
+	ASSERT(spawn);
+
+	int z = tile->getZ();
+	int start_x = std::max(tile->getX() - spawn->getSize(), 0);
+	int start_y = std::max(tile->getY() - spawn->getSize(), 0);
+	int end_x = std::min(tile->getX() + spawn->getSize(), MAP_MAX_WIDTH);
+	int end_y = std::min(tile->getY() + spawn->getSize(), MAP_MAX_HEIGHT);
+
+	for (int y = start_y; y <= end_y; ++y) {
+		for (int x = start_x; x <= end_x; ++x) {
+			TileLocation* ctile_loc = getTileL(x, y, z);
+			if (ctile_loc != nullptr && ctile_loc->getSpawnCount() > 0) {
+				ctile_loc->decreaseSpawnCount();
+			}
+		}
+	}
+}
+
+void Map::removeSpawn(Tile* tile) {
+	if (tile->spawn) {
+		removeSpawnInternal(tile);
+		spawns.removeSpawn(tile);
+	}
+}
+
+SpawnList Map::getSpawnList(Tile* where) {
+	SpawnList list;
+	TileLocation* tile_loc = where->getLocation();
+	if (tile_loc) {
+		if (tile_loc->getSpawnCount() > 0) {
+			uint32_t found = 0;
+			if (where->spawn) {
+				++found;
+				list.push_back(where->spawn);
+			}
+
+			// Scans the border tiles in an expanding square around the original spawn
+			int z = where->getZ();
+			int start_x = where->getX() - 1, end_x = where->getX() + 1;
+			int start_y = where->getY() - 1, end_y = where->getY() + 1;
+			while (found != tile_loc->getSpawnCount()) {
+				for (int x = start_x; x <= end_x; ++x) {
+					Tile* tile = getTile(x, start_y, z);
+					if (tile && tile->spawn) {
+						list.push_back(tile->spawn);
+						++found;
+					}
+					tile = getTile(x, end_y, z);
+					if (tile && tile->spawn) {
+						list.push_back(tile->spawn);
+						++found;
+					}
+				}
+
+				for (int y = start_y + 1; y < end_y; ++y) {
+					Tile* tile = getTile(start_x, y, z);
+					if (tile && tile->spawn) {
+						list.push_back(tile->spawn);
+						++found;
+					}
+					tile = getTile(end_x, y, z);
+					if (tile && tile->spawn) {
+						list.push_back(tile->spawn);
+						++found;
+					}
+				}
+				--start_x, --start_y;
+				++end_x, ++end_y;
+			}
+		}
+	}
+	return list;
+}
+
+int64_t RemoveMonstersOnMap(Map& map, bool selectedOnly) {
+	MapChunkRevisionTracker::Batch chunkBatch(map.getChunkRevisionTracker());
+	int64_t done = 0;
+	int64_t removed = 0;
+
+	MapIterator it = map.begin();
+	MapIterator end = map.end();
+
+	while (it != end) {
+		++done;
+		Tile* tile = (*it)->get();
+		if (selectedOnly && !tile->isSelected()) {
+			++it;
+			continue;
+		}
+
+		if (tile->creature) {
+			delete tile->creature;
+			tile->creature = nullptr;
+			tile->markRenderChunkChanged();
+			++removed;
+		}
+
+		++it;
+	}
+	return removed;
+}
+
+int64_t EditMonsterSpawnTime(Map& map, bool selectedOnly, int32_t spawnTime) {
+	int64_t done = 0;
+	int64_t updated = 0;
+
+	MapIterator it = map.begin();
+	MapIterator end = map.end();
+
+	while (it != end) {
+		++done;
+		Tile* tile = (*it)->get();
+		if (selectedOnly && !tile->isSelected()) {
+			++it;
+			continue;
+		}
+
+		if (tile->creature) {
+			tile->creature->setSpawnTime(spawnTime);
+			++updated;
+		}
+
+		++it;
+	}
+	return updated;
+}
+
+std::pair<int64_t, std::unordered_map<std::string, int64_t>> CountMonstersOnMap(Map& map, bool selectedOnly) {
+	int64_t done = 0;
+	int64_t total = 0;
+	std::unordered_map<std::string, int64_t> monsterCount;
+
+	MapIterator it = map.begin();
+	MapIterator end = map.end();
+
+	while (it != end) {
+		++done;
+		Tile* tile = (*it)->get();
+		if (selectedOnly && !tile->isSelected()) {
+			++it;
+			continue;
+		}
+
+		if (tile->creature) {
+			++total;
+			++monsterCount[tile->creature->getName()];
+		}
+
+		++it;
+	}
+
+	return std::make_pair(total, monsterCount);
+}

@@ -1,0 +1,1744 @@
+//////////////////////////////////////////////////////////////////////
+// This file is part of Remere's Map Editor
+//////////////////////////////////////////////////////////////////////
+// Remere's Map Editor is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Remere's Map Editor is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+//////////////////////////////////////////////////////////////////////
+
+#include "main.h"
+#include "theme.h"
+
+#include "materials.h"
+#include "brush.h"
+#include "editor.h"
+
+#include "items.h"
+#include "map.h"
+#include "item.h"
+#include "raw_brush.h"
+
+#include "gui.h"
+#include "application.h"
+#include "common_windows.h"
+#include "palette_model.h"
+
+#include <limits>
+#include <set>
+#include <utility>
+#include "positionctrl.h"
+
+#include "iominimap.h"
+
+#ifdef _MSC_VER
+	#pragma warning(disable : 4018) // signed/unsigned mismatch
+#endif
+
+// ============================================================================
+// Map Properties Window
+
+BEGIN_EVENT_TABLE(MapPropertiesWindow, wxDialog)
+EVT_CHOICE(MAP_PROPERTIES_VERSION, MapPropertiesWindow::OnChangeVersion)
+EVT_BUTTON(wxID_OK, MapPropertiesWindow::OnClickOK)
+EVT_BUTTON(wxID_CANCEL, MapPropertiesWindow::OnClickCancel)
+END_EVENT_TABLE()
+
+MapPropertiesWindow::MapPropertiesWindow(wxWindow* parent, MapTab* view, Editor& editor) :
+	wxDialog(parent, wxID_ANY, "Map Properties", wxDefaultPosition, wxSize(300, 200), wxRESIZE_BORDER | wxCAPTION),
+	view(view),
+	editor(editor) {
+	// Setup data variabels
+	Map& map = editor.map;
+
+	wxSizer* topsizer = newd wxBoxSizer(wxVERTICAL);
+
+	auto* grid_sizer = newd wxFlexGridSizer(2, 10, 10);
+	grid_sizer->AddGrowableCol(1);
+
+	// Description
+	grid_sizer->Add(newd wxStaticText(this, wxID_ANY, "Map Description"));
+	description_ctrl = newd wxTextCtrl(this, wxID_ANY, wxstr(map.getMapDescription()), wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE);
+	grid_sizer->Add(description_ctrl, wxSizerFlags(1).Expand());
+
+	// Map version
+	grid_sizer->Add(newd wxStaticText(this, wxID_ANY, "Map Version"));
+	version_choice = newd wxChoice(this, MAP_PROPERTIES_VERSION);
+	version_choice->Append("OTServ 0.5.0");
+	version_choice->Append("OTServ 0.6.0");
+	version_choice->Append("OTServ 0.6.1");
+	version_choice->Append("OTServ 0.7.0 (revscriptsys)");
+
+	switch (map.getVersion().otbm) {
+		case MAP_OTBM_1:
+			version_choice->SetSelection(0);
+			break;
+		case MAP_OTBM_2:
+			version_choice->SetSelection(1);
+			break;
+		case MAP_OTBM_3:
+			version_choice->SetSelection(2);
+			break;
+		case MAP_OTBM_4:
+			version_choice->SetSelection(3);
+			break;
+		default:
+			version_choice->SetSelection(0);
+	}
+
+	grid_sizer->Add(version_choice, wxSizerFlags(1).Expand());
+
+	// Version
+	grid_sizer->Add(newd wxStaticText(this, wxID_ANY, "Client Version"));
+	protocol_choice = newd wxChoice(this, wxID_ANY);
+
+	protocol_choice->SetStringSelection(wxstr(g_gui.GetCurrentVersion().getName()));
+
+	grid_sizer->Add(protocol_choice, wxSizerFlags(1).Expand());
+
+	// Dimensions
+	grid_sizer->Add(newd wxStaticText(this, wxID_ANY, "Map Dimensions"));
+	{
+		wxSizer* subsizer = newd wxBoxSizer(wxHORIZONTAL);
+		subsizer->Add(
+			width_spin = newd wxSpinCtrl(this, wxID_ANY, wxstr(i2s(map.getWidth())), wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 256, MAP_MAX_WIDTH), wxSizerFlags(1).Expand()
+		);
+		subsizer->Add(
+			height_spin = newd wxSpinCtrl(this, wxID_ANY, wxstr(i2s(map.getHeight())), wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 256, MAP_MAX_HEIGHT), wxSizerFlags(1).Expand()
+		);
+		grid_sizer->Add(subsizer, 1, wxEXPAND);
+	}
+
+	// External files
+	grid_sizer->Add(
+		newd wxStaticText(this, wxID_ANY, "External Housefile")
+	);
+
+	grid_sizer->Add(
+		house_filename_ctrl = newd wxTextCtrl(this, wxID_ANY, wxstr(map.getHouseFilename())), 1, wxEXPAND
+	);
+
+	grid_sizer->Add(
+		newd wxStaticText(this, wxID_ANY, "External Zonefile")
+	);
+
+	grid_sizer->Add(
+		zone_filename_ctrl = newd wxTextCtrl(this, wxID_ANY, wxstr(map.getZoneFilename())), 1, wxEXPAND
+	);
+
+	grid_sizer->Add(
+		newd wxStaticText(this, wxID_ANY, "External Spawnfile")
+	);
+
+	grid_sizer->Add(
+		spawn_filename_ctrl = newd wxTextCtrl(this, wxID_ANY, wxstr(map.getSpawnFilename())), 1, wxEXPAND
+	);
+
+	topsizer->Add(grid_sizer, wxSizerFlags(1).Expand().Border(wxALL, 20));
+
+	wxSizer* subsizer = newd wxBoxSizer(wxHORIZONTAL);
+	subsizer->Add(newd wxButton(this, wxID_OK, "OK"), wxSizerFlags(1).Center());
+	subsizer->Add(newd wxButton(this, wxID_CANCEL, "Cancel"), wxSizerFlags(1).Center());
+	topsizer->Add(subsizer, wxSizerFlags(0).Center().Border(wxLEFT | wxRIGHT | wxBOTTOM, 20));
+
+	SetSizerAndFit(topsizer);
+	Centre(wxBOTH);
+	UpdateProtocolList();
+
+	ClientVersion* current_version = ClientVersion::get(map.getVersion().client);
+	protocol_choice->SetStringSelection(wxstr(current_version->getName()));
+}
+
+void MapPropertiesWindow::UpdateProtocolList() {
+	wxString ver = version_choice->GetStringSelection();
+	wxString client = protocol_choice->GetStringSelection();
+
+	protocol_choice->Clear();
+
+	ClientVersionList versions;
+	if (g_settings.getInteger(Config::USE_OTBM_4_FOR_ALL_MAPS)) {
+		versions = ClientVersion::getAllVisible();
+	} else {
+		MapVersionID map_version = MAP_OTBM_1;
+		if (ver.Contains("0.5.0")) {
+			map_version = MAP_OTBM_1;
+		} else if (ver.Contains("0.6.0")) {
+			map_version = MAP_OTBM_2;
+		} else if (ver.Contains("0.6.1")) {
+			map_version = MAP_OTBM_3;
+		} else if (ver.Contains("0.7.0")) {
+			map_version = MAP_OTBM_4;
+		}
+
+		ClientVersionList protocols = ClientVersion::getAllForOTBMVersion(map_version);
+		for (ClientVersionList::const_iterator p = protocols.begin(); p != protocols.end(); ++p) {
+			protocol_choice->Append(wxstr((*p)->getName()));
+		}
+	}
+	protocol_choice->SetSelection(0);
+	protocol_choice->SetStringSelection(client);
+}
+
+void MapPropertiesWindow::OnChangeVersion(wxCommandEvent&) {
+	UpdateProtocolList();
+}
+
+struct MapConversionContext {
+	struct CreatureInfo {
+		std::string name;
+		bool is_npc;
+		Outfit outfit;
+	};
+	typedef std::map<std::string, CreatureInfo> CreatureMap;
+	CreatureMap creature_types;
+
+	void operator()(Map& map, Tile* tile, long long done) {
+		if (tile->creature) {
+			auto f = creature_types.find(tile->creature->getName());
+			if (f == creature_types.end()) {
+				CreatureInfo info = {
+					tile->creature->getName(),
+					tile->creature->isNpc(),
+					tile->creature->getLookType()
+				};
+				creature_types[tile->creature->getName()] = info;
+			}
+		}
+	}
+};
+
+void MapPropertiesWindow::OnClickOK(wxCommandEvent& WXUNUSED(event)) {
+	Map& map = editor.map;
+
+	MapVersion old_ver = map.getVersion();
+	MapVersion new_ver;
+
+	wxString ver = version_choice->GetStringSelection();
+
+	new_ver.client = ClientVersion::get(nstr(protocol_choice->GetStringSelection()))->getID();
+	if (ver.Contains("0.5.0")) {
+		new_ver.otbm = MAP_OTBM_1;
+	} else if (ver.Contains("0.6.0")) {
+		new_ver.otbm = MAP_OTBM_2;
+	} else if (ver.Contains("0.6.1")) {
+		new_ver.otbm = MAP_OTBM_3;
+	} else if (ver.Contains("0.7.0")) {
+		new_ver.otbm = MAP_OTBM_4;
+	}
+
+	if (new_ver.client != old_ver.client) {
+		if (g_gui.GetOpenMapCount() > 1) {
+			g_gui.PopupDialog(this, "Error", "You can not change editor version with multiple maps open", wxOK);
+			return;
+		}
+		wxString error;
+		wxArrayString warnings;
+
+		// Switch version
+		g_gui.GetCurrentEditor()->selection.clear();
+		g_gui.GetCurrentEditor()->actionQueue->clear();
+
+		if (new_ver.client < old_ver.client) {
+			int ret = g_gui.PopupDialog(this, "Notice", "Converting to a previous version may have serious side-effects, are you sure you want to do this?", wxYES | wxNO);
+			if (ret != wxID_YES) {
+				return;
+			}
+			UnnamedRenderingLock();
+
+			// Remember all creatures types on the map
+			MapConversionContext conversion_context;
+			foreach_TileOnMap(map, conversion_context);
+
+			// Perform the conversion
+			map.convert(new_ver, true);
+
+			// Load the new version
+			if (!g_gui.LoadVersion(new_ver.client, error, warnings)) {
+				g_gui.ListDialog(this, "Warnings", warnings);
+				g_gui.PopupDialog(this, "Map Loader Error", error, wxOK);
+				g_gui.PopupDialog(this, "Conversion Error", "Could not convert map. The map will now be closed.", wxOK);
+
+				EndModal(0);
+				return;
+			}
+
+			// Remove all creatures that were present are present in the new version
+			for (auto cs = conversion_context.creature_types.begin(); cs != conversion_context.creature_types.end();) {
+				if (g_creatures[cs->first]) {
+					cs = conversion_context.creature_types.erase(cs);
+				} else {
+					++cs;
+				}
+			}
+
+			if (conversion_context.creature_types.size() > 0) {
+				int add = g_gui.PopupDialog(this, "Unrecognized creatures", "There were creatures on the old version that are not present in this and were on the map, do you want to add them to this version as well?", wxYES | wxNO);
+				if (add == wxID_YES) {
+					for (auto cs = conversion_context.creature_types.begin(); cs != conversion_context.creature_types.end(); ++cs) {
+						MapConversionContext::CreatureInfo info = cs->second;
+						g_creatures.addCreatureType(info.name, info.is_npc, info.outfit);
+					}
+				}
+			}
+
+			map.cleanInvalidTiles(true);
+		} else {
+			UnnamedRenderingLock();
+			if (!g_gui.LoadVersion(new_ver.client, error, warnings)) {
+				g_gui.ListDialog(this, "Warnings", warnings);
+				g_gui.PopupDialog(this, "Map Loader Error", error, wxOK);
+				g_gui.PopupDialog(this, "Conversion Error", "Could not convert map. The map will now be closed.", wxOK);
+
+				EndModal(0);
+				return;
+			}
+			map.convert(new_ver, true);
+		}
+	} else {
+		map.convert(new_ver, true);
+	}
+
+	bool changed = old_ver.otbm != new_ver.otbm || old_ver.client != new_ver.client
+		|| map.getMapDescription() != nstr(description_ctrl->GetValue())
+		|| map.getHouseFilename() != nstr(house_filename_ctrl->GetValue())
+		|| map.getSpawnFilename() != nstr(spawn_filename_ctrl->GetValue())
+		|| map.getZoneFilename() != nstr(zone_filename_ctrl->GetValue());
+
+	map.setMapDescription(nstr(description_ctrl->GetValue()));
+	map.setHouseFilename(nstr(house_filename_ctrl->GetValue()));
+	map.setSpawnFilename(nstr(spawn_filename_ctrl->GetValue()));
+	map.setZoneFilename(nstr(zone_filename_ctrl->GetValue()));
+
+	// Only resize if we have to
+	int new_map_width = width_spin->GetValue();
+	int new_map_height = height_spin->GetValue();
+	if (new_map_width != map.getWidth() || new_map_height != map.getHeight()) {
+		map.setWidth(new_map_width);
+		map.setHeight(new_map_height);
+		g_gui.FitViewToMap(view);
+		changed = true;
+	}
+	if (changed && map.doChange()) {
+		g_gui.UpdateTitle();
+	}
+	g_gui.RefreshPalettes();
+
+	EndModal(1);
+}
+
+void MapPropertiesWindow::OnClickCancel(wxCommandEvent& WXUNUSED(event)) {
+	// Just close this window
+	EndModal(1);
+}
+
+MapPropertiesWindow::~MapPropertiesWindow() = default;
+
+// ============================================================================
+// Map Import Window
+
+BEGIN_EVENT_TABLE(ImportMapWindow, wxDialog)
+EVT_BUTTON(MAP_WINDOW_FILE_BUTTON, ImportMapWindow::OnClickBrowse)
+EVT_BUTTON(wxID_OK, ImportMapWindow::OnClickOK)
+EVT_BUTTON(wxID_CANCEL, ImportMapWindow::OnClickCancel)
+END_EVENT_TABLE()
+
+ImportMapWindow::ImportMapWindow(wxWindow* parent, Editor& editor) :
+	wxDialog(parent, wxID_ANY, "Import Map", wxDefaultPosition, wxSize(350, 315)),
+	editor(editor) {
+	auto* sizer = newd wxBoxSizer(wxVERTICAL);
+	wxStaticBoxSizer* tmpsizer;
+
+	// File
+	tmpsizer = newd wxStaticBoxSizer(new wxStaticBox(this, wxID_ANY, "Map File"), wxHORIZONTAL);
+	file_text_field = newd wxTextCtrl(tmpsizer->GetStaticBox(), wxID_ANY, "", wxDefaultPosition, wxSize(230, 23));
+	tmpsizer->Add(file_text_field, 0, wxALL, 5);
+	auto* browse_button = newd wxButton(tmpsizer->GetStaticBox(), MAP_WINDOW_FILE_BUTTON, "Browse...", wxDefaultPosition, wxSize(80, 23));
+	tmpsizer->Add(browse_button, 0, wxALL, 5);
+	sizer->Add(tmpsizer, 1, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 5);
+
+	// Import offset
+	tmpsizer = newd wxStaticBoxSizer(new wxStaticBox(this, wxID_ANY, "Import Offset"), wxHORIZONTAL);
+	tmpsizer->Add(newd wxStaticText(tmpsizer->GetStaticBox(), wxID_ANY, "Offset X:"), 0, wxALL | wxEXPAND, 5);
+	x_offset_ctrl = newd wxSpinCtrl(tmpsizer->GetStaticBox(), wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(100, 23), wxSP_ARROW_KEYS, -MAP_MAX_HEIGHT, MAP_MAX_HEIGHT);
+	tmpsizer->Add(x_offset_ctrl, 0, wxALL, 5);
+	tmpsizer->Add(newd wxStaticText(tmpsizer->GetStaticBox(), wxID_ANY, "Offset Y:"), 0, wxALL, 5);
+	y_offset_ctrl = newd wxSpinCtrl(tmpsizer->GetStaticBox(), wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(100, 23), wxSP_ARROW_KEYS, -MAP_MAX_HEIGHT, MAP_MAX_HEIGHT);
+	tmpsizer->Add(y_offset_ctrl, 0, wxALL, 5);
+	tmpsizer->Add(newd wxStaticText(tmpsizer->GetStaticBox(), wxID_ANY, "Offset Z:"), 0, wxALL, 5);
+	z_offset_ctrl = newd wxSpinCtrl(tmpsizer->GetStaticBox(), wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(100, 23), wxSP_ARROW_KEYS, -MAP_MAX_LAYER, MAP_MAX_LAYER);
+	tmpsizer->Add(z_offset_ctrl, 0, wxALL, 5);
+	sizer->Add(tmpsizer, 1, wxEXPAND | wxLEFT | wxRIGHT, 5);
+
+	// Import options
+	wxArrayString house_choices;
+	house_choices.Add("Smart Merge");
+	house_choices.Add("Insert");
+	house_choices.Add("Merge");
+	house_choices.Add("Don't Import");
+
+	// House options
+	tmpsizer = newd wxStaticBoxSizer(new wxStaticBox(this, wxID_ANY, "House Import Behaviour"), wxVERTICAL);
+	house_options = newd wxChoice(tmpsizer->GetStaticBox(), wxID_ANY, wxDefaultPosition, wxDefaultSize, house_choices);
+	house_options->SetSelection(0);
+	tmpsizer->Add(house_options, 0, wxALL | wxEXPAND, 5);
+	sizer->Add(tmpsizer, 1, wxEXPAND | wxLEFT | wxRIGHT, 5);
+
+	// Import options
+	wxArrayString spawn_choices;
+	spawn_choices.Add("Merge");
+	spawn_choices.Add("Don't Import");
+
+	// Spawn options
+	tmpsizer = newd wxStaticBoxSizer(new wxStaticBox(this, wxID_ANY, "Spawn Import Behaviour"), wxVERTICAL);
+	spawn_options = newd wxChoice(tmpsizer->GetStaticBox(), wxID_ANY, wxDefaultPosition, wxDefaultSize, spawn_choices);
+	spawn_options->SetSelection(0);
+	tmpsizer->Add(spawn_options, 0, wxALL | wxEXPAND, 5);
+	sizer->Add(tmpsizer, 1, wxEXPAND | wxLEFT | wxRIGHT, 5);
+
+	// OK/Cancel buttons
+	auto* buttons = newd wxBoxSizer(wxHORIZONTAL);
+	buttons->Add(newd wxButton(this, wxID_OK, "Ok"), 0, wxALL, 5);
+	buttons->Add(newd wxButton(this, wxID_CANCEL, "Cancel"), 0, wxALL, 5);
+	sizer->Add(buttons, wxSizerFlags(1).Center());
+
+	SetSizer(sizer);
+	Layout();
+	Centre(wxBOTH);
+}
+
+ImportMapWindow::~ImportMapWindow() = default;
+
+void ImportMapWindow::OnClickBrowse(wxCommandEvent& WXUNUSED(event)) {
+	wxFileDialog dialog(this, "Import...", "", "", "*.otbm", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+	int ok = dialog.ShowModal();
+
+	if (ok == wxID_OK) {
+		file_text_field->ChangeValue(dialog.GetPath());
+	}
+}
+
+void ImportMapWindow::OnClickOK(wxCommandEvent& WXUNUSED(event)) {
+	if (Validate() && TransferDataFromWindow()) {
+		wxFileName fn = file_text_field->GetValue();
+		if (!fn.FileExists()) {
+			g_gui.PopupDialog(this, "Error", "The specified map file doesn't exist", wxOK);
+			return;
+		}
+
+		ImportType spawn_import_type = IMPORT_DONT;
+		ImportType house_import_type = IMPORT_DONT;
+
+		switch (spawn_options->GetSelection()) {
+			case 0:
+				spawn_import_type = IMPORT_MERGE;
+				break;
+			case 1:
+				spawn_import_type = IMPORT_DONT;
+				break;
+		}
+
+		switch (house_options->GetSelection()) {
+			case 0:
+				house_import_type = IMPORT_SMART_MERGE;
+				break;
+			case 1:
+				house_import_type = IMPORT_MERGE;
+				break;
+			case 2:
+				house_import_type = IMPORT_INSERT;
+				break;
+			case 3:
+				house_import_type = IMPORT_DONT;
+				break;
+		}
+
+		EndModal(1);
+
+		editor.importMap(fn, x_offset_ctrl->GetValue(), y_offset_ctrl->GetValue(), z_offset_ctrl->GetValue(), house_import_type, spawn_import_type);
+	}
+}
+
+void ImportMapWindow::OnClickCancel(wxCommandEvent& WXUNUSED(event)) {
+	// Just close this window
+	EndModal(0);
+}
+
+// ============================================================================
+// Export Minimap window
+
+BEGIN_EVENT_TABLE(ExportMiniMapWindow, wxDialog)
+EVT_BUTTON(MAP_WINDOW_FILE_BUTTON, ExportMiniMapWindow::OnClickBrowse)
+EVT_BUTTON(wxID_OK, ExportMiniMapWindow::OnClickOK)
+EVT_BUTTON(wxID_CANCEL, ExportMiniMapWindow::OnClickCancel)
+EVT_CHOICE(wxID_ANY, ExportMiniMapWindow::OnExportTypeChange)
+END_EVENT_TABLE()
+
+ExportMiniMapWindow::ExportMiniMapWindow(wxWindow* parent, Editor& editor) :
+	wxDialog(parent, wxID_ANY, "Export Minimap", wxDefaultPosition, wxSize(400, 300)),
+	editor(editor) {
+	wxSizer* sizer = newd wxBoxSizer(wxVERTICAL);
+	wxSizer* tmpsizer;
+
+	// Error field
+	error_field = newd wxStaticText(this, wxID_VIEW_DETAILS, "", wxDefaultPosition, wxDefaultSize);
+	error_field->SetForegroundColour(*wxRED);
+	tmpsizer = newd wxBoxSizer(wxHORIZONTAL);
+	tmpsizer->Add(error_field, 0, wxALL, 5);
+	sizer->Add(tmpsizer, 0, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 5);
+
+	// Output folder
+	directory_text_field = newd wxTextCtrl(this, wxID_ANY, "", wxDefaultPosition, wxDefaultSize);
+	directory_text_field->Bind(wxEVT_KEY_UP, &ExportMiniMapWindow::OnDirectoryChanged, this);
+	directory_text_field->SetValue(wxString(g_settings.getString(Config::MINIMAP_EXPORT_DIR)));
+	tmpsizer = newd wxStaticBoxSizer(wxHORIZONTAL, this, "Output Folder");
+	tmpsizer->Add(directory_text_field, 1, wxALL, 5);
+	tmpsizer->Add(newd wxButton(this, MAP_WINDOW_FILE_BUTTON, "Browse"), 0, wxALL, 5);
+	sizer->Add(tmpsizer, 0, wxALL | wxEXPAND, 5);
+
+	// File name
+	wxString mapName(editor.map.getName().c_str(), wxConvUTF8);
+	file_name_text_field = newd wxTextCtrl(this, wxID_ANY, mapName.BeforeLast('.'), wxDefaultPosition, wxDefaultSize);
+	file_name_text_field->Bind(wxEVT_KEY_UP, &ExportMiniMapWindow::OnFileNameChanged, this);
+	tmpsizer = newd wxStaticBoxSizer(wxHORIZONTAL, this, "File Name");
+	tmpsizer->Add(file_name_text_field, 1, wxALL, 5);
+	sizer->Add(tmpsizer, 0, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 5);
+
+	// Format options (shares the File Name row, matching upstream layout)
+	wxArrayString format_choices;
+	format_choices.Add(".otmm (Client Minimap)");
+	format_choices.Add(".png (PNG Image)");
+	format_choices.Add(".bmp (Bitmap Image)");
+	format_options = newd wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, format_choices);
+	format_options->SetSelection(0);
+	tmpsizer->Add(format_options, 1, wxALL, 5);
+
+	// Export options
+	wxArrayString choices;
+	choices.Add("All Floors");
+	choices.Add("Ground Floor");
+	choices.Add("Specific Floor");
+
+	if (editor.hasSelection()) {
+		choices.Add("Selected Area");
+	}
+
+	// Area options
+	tmpsizer = newd wxStaticBoxSizer(wxHORIZONTAL, this, "Area Options");
+	floor_options = newd wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, choices);
+	floor_number = newd wxSpinCtrl(this, wxID_ANY, i2ws(GROUND_LAYER), wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 0, MAP_MAX_LAYER, GROUND_LAYER);
+	floor_number->Enable(false);
+	floor_options->SetSelection(0);
+	tmpsizer->Add(floor_options, 1, wxALL, 5);
+	tmpsizer->Add(floor_number, 0, wxALL, 5);
+	sizer->Add(tmpsizer, 0, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 5);
+
+	// OK/Cancel buttons
+	tmpsizer = newd wxBoxSizer(wxHORIZONTAL);
+	tmpsizer->Add(ok_button = newd wxButton(this, wxID_OK, "OK"), wxSizerFlags(1).Center());
+	tmpsizer->Add(newd wxButton(this, wxID_CANCEL, "Cancel"), wxSizerFlags(1).Center());
+	sizer->Add(tmpsizer, 0, wxCENTER, 10);
+
+	SetSizer(sizer);
+	Layout();
+	Centre(wxBOTH);
+	CheckValues();
+}
+
+ExportMiniMapWindow::~ExportMiniMapWindow() = default;
+
+void ExportMiniMapWindow::OnExportTypeChange(wxCommandEvent& event) {
+	// Only the floor/area selector toggles the floor spin control.
+	// (format_options shares wxID_ANY and would otherwise trigger this too.)
+	if (event.GetEventObject() != floor_options) {
+		event.Skip();
+		return;
+	}
+	floor_number->Enable(event.GetSelection() == 2);
+}
+
+void ExportMiniMapWindow::OnClickBrowse(wxCommandEvent& WXUNUSED(event)) {
+	wxDirDialog dialog(nullptr, "Select the output folder", "", wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
+	if (dialog.ShowModal() == wxID_OK) {
+		const wxString& directory = dialog.GetPath();
+		directory_text_field->ChangeValue(directory);
+	}
+	CheckValues();
+}
+
+void ExportMiniMapWindow::OnDirectoryChanged(wxKeyEvent& event) {
+	CheckValues();
+	event.Skip();
+}
+
+void ExportMiniMapWindow::OnFileNameChanged(wxKeyEvent& event) {
+	CheckValues();
+	event.Skip();
+}
+
+void ExportMiniMapWindow::OnClickOK(wxCommandEvent& WXUNUSED(event)) {
+	g_gui.CreateLoadBar("Exporting minimap");
+
+	const std::string directory = directory_text_field->GetValue().ToStdString();
+	const std::string file_name = file_name_text_field->GetValue().ToStdString();
+	const int floor = floor_number->GetValue();
+	g_settings.setString(Config::MINIMAP_EXPORT_DIR, directory);
+
+	const auto format = static_cast<MinimapExportFormat>(format_options->GetSelection());
+	const auto mode = static_cast<MinimapExportMode>(floor_options->GetSelection());
+
+	IOMinimap io(&editor, format, mode, true);
+	if (!io.saveMinimap(directory, file_name, floor)) {
+		g_gui.PopupDialog("Error", wxstr(io.getError()), wxOK);
+	}
+
+	g_gui.DestroyLoadBar();
+	EndModal(1);
+}
+
+void ExportMiniMapWindow::OnClickCancel(wxCommandEvent& WXUNUSED(event)) {
+	// Just close this window
+	EndModal(0);
+}
+
+void ExportMiniMapWindow::CheckValues() {
+	if (directory_text_field->IsEmpty()) {
+		error_field->SetLabel("Type or select an output folder.");
+		ok_button->Enable(false);
+		return;
+	}
+
+	if (file_name_text_field->IsEmpty()) {
+		error_field->SetLabel("Type a name for the file.");
+		ok_button->Enable(false);
+		return;
+	}
+
+	FileName directory(directory_text_field->GetValue());
+
+	if (!directory.Exists()) {
+		error_field->SetLabel("Output folder not found.");
+		ok_button->Enable(false);
+		return;
+	}
+
+	if (!directory.IsDirWritable()) {
+		error_field->SetLabel("Output folder is not writable.");
+		ok_button->Enable(false);
+		return;
+	}
+
+	error_field->SetLabel(wxEmptyString);
+	ok_button->Enable(true);
+}
+
+// ============================================================================
+// Export Tilesets window
+
+BEGIN_EVENT_TABLE(ExportTilesetsWindow, wxDialog)
+EVT_BUTTON(TILESET_FILE_BUTTON, ExportTilesetsWindow::OnClickBrowse)
+EVT_BUTTON(wxID_OK, ExportTilesetsWindow::OnClickOK)
+EVT_BUTTON(wxID_CANCEL, ExportTilesetsWindow::OnClickCancel)
+END_EVENT_TABLE()
+
+ExportTilesetsWindow::ExportTilesetsWindow(wxWindow* parent, Editor& editor) :
+	wxDialog(parent, wxID_ANY, "Export Tilesets", wxDefaultPosition, wxSize(400, 230)),
+	editor(editor) {
+	wxSizer* sizer = newd wxBoxSizer(wxVERTICAL);
+	wxSizer* tmpsizer;
+
+	// Error field
+	error_field = newd wxStaticText(this, wxID_VIEW_DETAILS, "", wxDefaultPosition, wxDefaultSize);
+	error_field->SetForegroundColour(*wxRED);
+	tmpsizer = newd wxBoxSizer(wxHORIZONTAL);
+	tmpsizer->Add(error_field, 0, wxALL, 5);
+	sizer->Add(tmpsizer, 0, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 5);
+
+	// Output folder
+	directory_text_field = newd wxTextCtrl(this, wxID_ANY, "", wxDefaultPosition, wxDefaultSize);
+	directory_text_field->Bind(wxEVT_KEY_UP, &ExportTilesetsWindow::OnDirectoryChanged, this);
+	directory_text_field->SetValue(wxString(g_settings.getString(Config::TILESET_EXPORT_DIR)));
+	tmpsizer = newd wxStaticBoxSizer(wxHORIZONTAL, this, "Output Folder");
+	tmpsizer->Add(directory_text_field, 1, wxALL, 5);
+	tmpsizer->Add(newd wxButton(this, TILESET_FILE_BUTTON, "Browse"), 0, wxALL, 5);
+	sizer->Add(tmpsizer, 0, wxALL | wxEXPAND, 5);
+
+	// File name
+	file_name_text_field = newd wxTextCtrl(this, wxID_ANY, "tilesets", wxDefaultPosition, wxDefaultSize);
+	file_name_text_field->Bind(wxEVT_KEY_UP, &ExportTilesetsWindow::OnFileNameChanged, this);
+	tmpsizer = newd wxStaticBoxSizer(wxHORIZONTAL, this, "File Name");
+	tmpsizer->Add(file_name_text_field, 1, wxALL, 5);
+	sizer->Add(tmpsizer, 0, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 5);
+
+	// OK/Cancel buttons
+	tmpsizer = newd wxBoxSizer(wxHORIZONTAL);
+	tmpsizer->Add(ok_button = newd wxButton(this, wxID_OK, "OK"), wxSizerFlags(1).Center());
+	tmpsizer->Add(newd wxButton(this, wxID_CANCEL, "Cancel"), wxSizerFlags(1).Center());
+	sizer->Add(tmpsizer, 0, wxCENTER, 10);
+
+	SetSizer(sizer);
+	Layout();
+	Centre(wxBOTH);
+	CheckValues();
+}
+
+ExportTilesetsWindow::~ExportTilesetsWindow() = default;
+
+void ExportTilesetsWindow::OnClickBrowse(wxCommandEvent& WXUNUSED(event)) {
+	wxDirDialog dialog(nullptr, "Select the output folder", "", wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
+	if (dialog.ShowModal() == wxID_OK) {
+		const wxString& directory = dialog.GetPath();
+		directory_text_field->ChangeValue(directory);
+	}
+	CheckValues();
+}
+
+void ExportTilesetsWindow::OnDirectoryChanged(wxKeyEvent& event) {
+	CheckValues();
+	event.Skip();
+}
+
+void ExportTilesetsWindow::OnFileNameChanged(wxKeyEvent& event) {
+	CheckValues();
+	event.Skip();
+}
+
+void ExportTilesetsWindow::OnClickOK(wxCommandEvent& WXUNUSED(event)) {
+	g_gui.CreateLoadBar("Exporting Tilesets");
+
+	try {
+		FileName directory(directory_text_field->GetValue());
+		g_settings.setString(Config::TILESET_EXPORT_DIR, directory_text_field->GetValue().ToStdString());
+
+		FileName file(file_name_text_field->GetValue() + ".xml");
+		file.Normalize(wxPATH_NORM_ENV_VARS | wxPATH_NORM_DOTS | wxPATH_NORM_TILDE | wxPATH_NORM_ABSOLUTE | wxPATH_NORM_LONG | wxPATH_NORM_SHORTCUT, directory.GetFullPath());
+
+		pugi::xml_document doc;
+		pugi::xml_node node = doc.append_child("materials");
+
+		std::map<std::string, TilesetCategoryType> palettes {
+			{ "Terrain", TILESET_TERRAIN },
+			{ "Doodad", TILESET_DOODAD },
+			{ "Items", TILESET_ITEM },
+			{ "Collection", TILESET_COLLECTION },
+			{ "Raw", TILESET_RAW }
+		};
+		for (auto iter = g_materials.tilesets.begin(); iter != g_materials.tilesets.end(); ++iter) {
+			std::string _data = iter->second->name;
+			std::transform(_data.begin(), _data.end(), _data.begin(), [](unsigned char c) { return std::tolower(c); });
+			if (_data == "others") {
+				bool blocked = 1;
+
+				for (const auto& kv : palettes) {
+					TilesetCategory* tilesetCategory = iter->second->getCategory(kv.second);
+
+					if (kv.second != TILESET_RAW && tilesetCategory->brushlist.size() > 0) {
+						blocked = 0;
+					}
+				}
+
+				if (blocked) {
+					continue;
+				}
+			}
+
+			pugi::xml_node tileset = node.append_child("tileset");
+			tileset.append_attribute("name") = iter->second->name.c_str();
+
+			for (const auto& kv : palettes) {
+				TilesetCategory* tilesetCategory = iter->second->getCategory(kv.second);
+
+				if (tilesetCategory->brushlist.size() > 0) {
+					std::string data = kv.first;
+					std::transform(data.begin(), data.end(), data.begin(), [](unsigned char c) { return std::tolower(c); });
+
+					pugi::xml_node palette = tileset.append_child(data.c_str());
+					for (BrushVector::const_iterator _iter = tilesetCategory->brushlist.begin(); _iter != tilesetCategory->brushlist.end(); ++_iter) {
+						if (!(*_iter)->isRaw()) {
+							pugi::xml_node brush = palette.append_child("brush");
+							brush.append_attribute("name") = (*_iter)->getName().c_str();
+						} else {
+							ItemType& it = g_items[(*_iter)->asRaw()->getItemID()];
+							if (it.id != 0) {
+								pugi::xml_node item = palette.append_child("item");
+								item.append_attribute("id") = it.id;
+							}
+						}
+					}
+				}
+			}
+
+			size_t n = std::distance(tileset.begin(), tileset.end());
+			if (n <= 0) {
+				node.remove_child(tileset);
+			}
+		}
+
+		doc.save_file(file.GetFullPath().mb_str());
+		g_gui.PopupDialog("Successfully saved Tilesets", "Saved tilesets to '" + std::string(file.GetFullPath().mb_str()) + "'", wxOK);
+		g_materials.modify(false);
+	} catch (std::bad_alloc&) {
+		g_gui.PopupDialog("Error", "There is not enough memory available to complete the operation.", wxOK);
+	}
+
+	g_gui.DestroyLoadBar();
+	EndModal(1);
+}
+
+void ExportTilesetsWindow::OnClickCancel(wxCommandEvent& WXUNUSED(event)) {
+	// Just close this window
+	EndModal(0);
+}
+
+void ExportTilesetsWindow::CheckValues() {
+	if (directory_text_field->IsEmpty()) {
+		error_field->SetLabel("Type or select an output folder.");
+		ok_button->Enable(false);
+		return;
+	}
+
+	if (file_name_text_field->IsEmpty()) {
+		error_field->SetLabel("Type a name for the file.");
+		ok_button->Enable(false);
+		return;
+	}
+
+	FileName directory(directory_text_field->GetValue());
+
+	if (!directory.Exists()) {
+		error_field->SetLabel("Output folder not found.");
+		ok_button->Enable(false);
+		return;
+	}
+
+	if (!directory.IsDirWritable()) {
+		error_field->SetLabel("Output folder is not writable.");
+		ok_button->Enable(false);
+		return;
+	}
+
+	error_field->SetLabel(wxEmptyString);
+	ok_button->Enable(true);
+}
+
+// ============================================================================
+// Numkey forwarding text control
+
+BEGIN_EVENT_TABLE(KeyForwardingTextCtrl, wxTextCtrl)
+EVT_KEY_DOWN(KeyForwardingTextCtrl::OnKeyDown)
+END_EVENT_TABLE()
+
+void KeyForwardingTextCtrl::OnKeyDown(wxKeyEvent& event) {
+	if (event.GetKeyCode() == WXK_UP || event.GetKeyCode() == WXK_DOWN || event.GetKeyCode() == WXK_PAGEDOWN || event.GetKeyCode() == WXK_PAGEUP) {
+		GetParent()->GetEventHandler()->AddPendingEvent(event);
+	} else {
+		event.Skip();
+	}
+}
+
+// ============================================================================
+// Find Item Dialog (Jump to item)
+
+BEGIN_EVENT_TABLE(FindDialog, wxDialog)
+EVT_TIMER(wxID_ANY, FindDialog::OnTextIdle)
+EVT_TEXT(JUMP_DIALOG_TEXT, FindDialog::OnTextChange)
+EVT_KEY_DOWN(FindDialog::OnKeyDown)
+EVT_TEXT_ENTER(JUMP_DIALOG_TEXT, FindDialog::OnClickOK)
+EVT_LISTBOX_DCLICK(JUMP_DIALOG_LIST, FindDialog::OnClickList)
+EVT_BUTTON(wxID_OK, FindDialog::OnClickOK)
+EVT_BUTTON(wxID_CANCEL, FindDialog::OnClickCancel)
+END_EVENT_TABLE()
+
+FindDialog::FindDialog(wxWindow* parent, const wxString& title) :
+	wxDialog(g_gui.root, wxID_ANY, title, wxDefaultPosition, wxDefaultSize, wxRESIZE_BORDER | wxCAPTION | wxCLOSE_BOX),
+	idle_input_timer(this),
+	result_brush(nullptr),
+	result_id(0) {
+	wxSizer* sizer = newd wxBoxSizer(wxVERTICAL);
+
+	search_field = newd KeyForwardingTextCtrl(this, JUMP_DIALOG_TEXT, "", wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
+	search_field->SetFocus();
+	sizer->Add(search_field, 0, wxEXPAND);
+
+	item_list = newd FindDialogListBox(this, JUMP_DIALOG_LIST);
+	item_list->SetMinSize(wxSize(470, 400));
+	sizer->Add(item_list, wxSizerFlags(1).Expand().Border());
+
+	wxSizer* stdsizer = newd wxBoxSizer(wxHORIZONTAL);
+	stdsizer->Add(newd wxButton(this, wxID_OK, "OK"), wxSizerFlags(1).Center());
+	stdsizer->Add(newd wxButton(this, wxID_CANCEL, "Cancel"), wxSizerFlags(1).Center());
+	sizer->Add(stdsizer, wxSizerFlags(0).Center().Border());
+
+	SetSizerAndFit(sizer);
+	Centre(wxBOTH);
+	// We can't call it here since it calls an abstract function, call in child constructors instead.
+}
+
+FindDialog::~FindDialog() = default;
+
+void FindDialog::OnKeyDown(wxKeyEvent& event) {
+	int w, h;
+	item_list->GetSize(&w, &h);
+	size_t amount = 1;
+
+	switch (event.GetKeyCode()) {
+		case WXK_PAGEUP:
+			amount = h / 32 + 1;
+			[[fallthrough]];
+		case WXK_UP: {
+			if (item_list->GetItemCount() > 0) {
+				ssize_t n = item_list->GetSelection();
+				if (n == wxNOT_FOUND) {
+					n = 0;
+				} else if (static_cast<size_t>(n) > amount) {
+					// n is non-negative here, so comparing as size_t is safe and
+					// says directly what the old mixed-sign underflow guard meant.
+					n -= static_cast<ssize_t>(amount);
+				} else {
+					n = 0;
+				}
+				item_list->SetSelection(static_cast<int>(n));
+			}
+			break;
+		}
+
+		case WXK_PAGEDOWN:
+			amount = h / 32 + 1;
+			[[fallthrough]];
+		case WXK_DOWN: {
+			if (item_list->GetItemCount() > 0) {
+				ssize_t n = item_list->GetSelection();
+				size_t itemcount = item_list->GetItemCount();
+				if (n == wxNOT_FOUND) {
+					n = 0;
+				} else if (static_cast<uint32_t>(n) < itemcount - amount && itemcount - amount < itemcount) {
+					n += static_cast<ssize_t>(amount);
+				} else {
+					n = static_cast<ssize_t>(item_list->GetItemCount()) - 1;
+				}
+
+				item_list->SetSelection(static_cast<int>(n));
+			}
+			break;
+		}
+		default:
+			event.Skip();
+			break;
+	}
+}
+
+void FindDialog::OnTextIdle(wxTimerEvent& WXUNUSED(event)) {
+	RefreshContents();
+}
+
+void FindDialog::OnTextChange(wxCommandEvent& WXUNUSED(event)) {
+	idle_input_timer.Start(800, true);
+}
+
+void FindDialog::OnClickList(wxCommandEvent& event) {
+	OnClickListInternal(event);
+}
+
+void FindDialog::OnClickOK(wxCommandEvent& WXUNUSED(event)) {
+	// This is to get virtual callback
+	OnClickOKInternal();
+}
+
+void FindDialog::OnClickCancel(wxCommandEvent& WXUNUSED(event)) {
+	EndModal(0);
+}
+
+void FindDialog::RefreshContents() {
+	// This is to get virtual callback
+	RefreshContentsInternal();
+}
+
+// ============================================================================
+// Find Brush Dialog (Jump to brush)
+
+FindBrushDialog::FindBrushDialog(wxWindow* parent, wxString title) :
+	FindDialog(parent, title) {
+	RefreshContents();
+}
+
+FindBrushDialog::~FindBrushDialog() = default;
+
+void FindBrushDialog::OnClickListInternal(wxCommandEvent& event) {
+	Brush* brush = item_list->GetSelectedBrush();
+	if (brush) {
+		result_brush = brush;
+		EndModal(1);
+	}
+}
+
+void FindBrushDialog::OnClickOKInternal() {
+	// This is kind of stupid as it would fail unless the "Please enter a search string" wasn't there
+	if (item_list->GetItemCount() > 0) {
+		if (item_list->GetSelection() == wxNOT_FOUND) {
+			item_list->SetSelection(0);
+		}
+		Brush* brush = item_list->GetSelectedBrush();
+		if (!brush) {
+			// It's either "Please enter a search string" or "No matches"
+			// Perhaps we can refresh now?
+			std::string search_string = as_lower_str(nstr(search_field->GetValue()));
+			bool do_search = (search_string.size() >= 2);
+
+			if (do_search) {
+				const BrushMap& map = g_brushes.getMap();
+				for (auto iter = map.begin(); iter != map.end(); ++iter) {
+					const Brush* brush = iter->second;
+					if (as_lower_str(brush->getName()).find(search_string) == std::string::npos) {
+						continue;
+					}
+
+					// Don't match RAWs now.
+					if (brush->isRaw()) {
+						continue;
+					}
+
+					// Found one!
+					result_brush = brush;
+					break;
+				}
+
+				// Did we not find a matching brush?
+				if (!result_brush) {
+					// Then let's search the RAWs
+					for (int id = 0; id <= g_items.getMaxID(); ++id) {
+						ItemType& it = g_items[id];
+						if (it.id == 0) {
+							continue;
+						}
+
+						RAWBrush* raw_brush = it.raw_brush;
+						if (!raw_brush) {
+							continue;
+						}
+
+						if (as_lower_str(raw_brush->getName()).find(search_string) == std::string::npos) {
+							continue;
+						}
+
+						// Found one!
+						result_brush = raw_brush;
+						break;
+					}
+				}
+				// Done!
+			}
+		} else {
+			result_brush = brush;
+		}
+	}
+	EndModal(1);
+}
+
+void FindBrushDialog::RefreshContentsInternal() {
+	item_list->Clear();
+
+	std::string search_string = as_lower_str(nstr(search_field->GetValue()));
+	bool do_search = (search_string.size() >= 2);
+
+	if (do_search) {
+
+		bool found_search_results = false;
+
+		const BrushMap& brushes_map = g_brushes.getMap();
+
+		// We store the raws so they display last of all results
+		std::deque<const RAWBrush*> raws;
+
+		for (auto iter = brushes_map.begin(); iter != brushes_map.end(); ++iter) {
+			const Brush* brush = iter->second;
+
+			if (as_lower_str(brush->getName()).find(search_string) == std::string::npos) {
+				continue;
+			}
+
+			if (brush->isRaw()) {
+				continue;
+			}
+
+			found_search_results = true;
+			item_list->AddBrush(const_cast<Brush*>(brush));
+		}
+
+		for (int id = 0; id <= g_items.getMaxID(); ++id) {
+			ItemType& it = g_items[id];
+			if (it.id == 0) {
+				continue;
+			}
+
+			RAWBrush* raw_brush = it.raw_brush;
+			if (!raw_brush) {
+				continue;
+			}
+
+			if (as_lower_str(raw_brush->getName()).find(search_string) == std::string::npos) {
+				continue;
+			}
+
+			found_search_results = true;
+			item_list->AddBrush(raw_brush);
+		}
+
+		while (raws.size() > 0) {
+			item_list->AddBrush(const_cast<RAWBrush*>(raws.front()));
+			raws.pop_front();
+		}
+
+		if (found_search_results) {
+			item_list->SetSelection(0);
+		} else {
+			item_list->SetNoMatches();
+		}
+	}
+	item_list->Refresh();
+}
+
+// ============================================================================
+// Listbox in find item / brush stuff
+
+FindDialogListBox::FindDialogListBox(wxWindow* parent, wxWindowID id) :
+	wxVListBox(parent, id, wxDefaultPosition, wxDefaultSize, wxLB_SINGLE),
+	cleared(false),
+	no_matches(false) {
+	SetBackgroundColour(Theme::Get(Theme::Role::Background));
+	SetForegroundColour(Theme::Get(Theme::Role::Text));
+	Clear();
+}
+
+FindDialogListBox::~FindDialogListBox() {
+	////
+}
+
+void FindDialogListBox::Clear() {
+	SetSelection(wxNOT_FOUND);
+	cleared = true;
+	no_matches = false;
+	brushlist.clear();
+	SetItemCount(1);
+}
+
+void FindDialogListBox::SetNoMatches() {
+	SetSelection(wxNOT_FOUND);
+	cleared = false;
+	no_matches = true;
+	brushlist.clear();
+	SetItemCount(1);
+}
+
+void FindDialogListBox::AddBrush(Brush* brush) {
+	if (cleared || no_matches) {
+		SetItemCount(0);
+	}
+
+	cleared = false;
+	no_matches = false;
+
+	brushlist.push_back(brush);
+	SetItemCount(brushlist.size());
+}
+
+void FindDialogListBox::SetBrushes(std::vector<Brush*> brushes) {
+	SetSelection(wxNOT_FOUND);
+	brushlist = std::move(brushes);
+	cleared = false;
+	no_matches = brushlist.empty();
+	SetItemCount(no_matches ? 1 : brushlist.size());
+	Refresh();
+}
+
+Brush* FindDialogListBox::GetSelectedBrush() {
+	ssize_t n = GetSelection();
+	if (n < 0 || no_matches || cleared || static_cast<size_t>(n) >= brushlist.size()) {
+		return nullptr;
+	}
+	return brushlist[n];
+}
+
+void FindDialogListBox::OnDrawItem(wxDC& dc, const wxRect& rect, size_t n) const {
+	constexpr int iconDim = 32;
+	int charHeight = dc.GetCharHeight();
+	if (charHeight <= 0) {
+		charHeight = 14;
+	}
+	auto layout = PaletteModel::CalculateListItemLayout(rect.GetX(), rect.GetY(), rect.GetWidth(), rect.GetHeight(), iconDim, charHeight);
+
+	if (no_matches) {
+		dc.DrawText("No matches for your search.", layout.textX, layout.textY);
+	} else if (cleared) {
+		dc.DrawText("Please enter your search string.", layout.textX, layout.textY);
+	} else {
+		if (n >= brushlist.size() || !brushlist[n]) {
+			return;
+		}
+		Sprite* spr = g_gui.gfx.getSprite(brushlist[n]->getLookID());
+		if (spr) {
+			spr->DrawTo(&dc, SPRITE_SIZE_32x32, layout.iconX, layout.iconY, layout.iconWidth, layout.iconHeight);
+		}
+
+		if (IsSelected(n)) {
+			dc.SetTextForeground(Theme::Get(Theme::Role::TextOnAccent));
+		} else {
+			dc.SetTextForeground(Theme::Get(Theme::Role::Text));
+		}
+
+		dc.DrawText(wxstr(brushlist[n]->getName()), layout.textX, layout.textY);
+	}
+}
+
+wxCoord FindDialogListBox::OnMeasureItem(size_t n) const {
+	return FromDIP(36);
+}
+
+// ============================================================================
+// wxListBox that can be sorted
+
+SortableListBox::SortableListBox(wxWindow* parent, wxWindowID id, const wxPoint& pos, const wxSize& size) :
+	wxListBox(parent, id, pos, size, 0, nullptr, wxLB_SINGLE | wxLB_NEEDED_SB) { }
+
+SortableListBox::~SortableListBox() { }
+
+void SortableListBox::Sort() {
+
+	if (GetCount() == 0) {
+		return;
+	}
+
+	wxASSERT_MSG(GetClientDataType() != wxClientData_Object, "Sorting a list with data of type wxClientData_Object is currently not implemented");
+
+	DoSort();
+}
+
+void SortableListBox::DoSort() {
+	size_t count = GetCount();
+	int selection = GetSelection();
+	wxClientDataType dataType = GetClientDataType();
+
+	wxArrayString stringList;
+	wxArrayPtrVoid dataList;
+
+	for (size_t i = 0; i < count; ++i) {
+		stringList.Add(GetString(i));
+		if (dataType == wxClientData_Void) {
+			dataList.Add(GetClientData(i));
+		}
+	}
+
+	// Insertion sort
+	for (size_t i = 0; i < count; ++i) {
+		size_t j = i;
+		while (j > 0 && stringList[j].CmpNoCase(stringList[j - 1]) < 0) {
+
+			wxString tmpString = stringList[j];
+			stringList[j] = stringList[j - 1];
+			stringList[j - 1] = tmpString;
+
+			if (dataType == wxClientData_Void) {
+				void* tmpData = dataList[j];
+				dataList[j] = dataList[j - 1];
+				dataList[j - 1] = tmpData;
+			}
+
+			if (selection == static_cast<int>(j - 1)) {
+				selection++;
+			} else if (selection == static_cast<int>(j)) {
+				selection--;
+			}
+
+			j--;
+		}
+	}
+
+	Freeze();
+	Clear();
+	for (size_t i = 0; i < count; ++i) {
+		if (dataType == wxClientData_Void) {
+			Append(stringList[i], dataList[i]);
+		} else {
+			Append(stringList[i]);
+		}
+	}
+	Thaw();
+
+	SetSelection(selection);
+}
+
+// ============================================================================
+// Object properties base
+
+ObjectPropertiesWindowBase::ObjectPropertiesWindowBase(wxWindow* parent, const wxString& title, const Map* map, const Tile* tile, Item* item, wxPoint position /* = wxDefaultPosition */) :
+	wxDialog(parent, wxID_ANY, title, position, wxSize(600, 400), wxCAPTION | wxCLOSE_BOX | wxRESIZE_BORDER),
+	edit_map(map),
+	edit_tile(tile),
+	edit_item(item),
+	edit_creature(nullptr),
+	edit_spawn(nullptr) {
+	////
+}
+
+ObjectPropertiesWindowBase::ObjectPropertiesWindowBase(wxWindow* parent, const wxString& title, const Map* map, const Tile* tile, Creature* creature, wxPoint position /* = wxDefaultPosition */) :
+	wxDialog(parent, wxID_ANY, title, position, wxSize(600, 400), wxCAPTION | wxCLOSE_BOX | wxRESIZE_BORDER),
+	edit_map(map),
+	edit_tile(tile),
+	edit_item(nullptr),
+	edit_creature(creature),
+	edit_spawn(nullptr) {
+	////
+}
+
+ObjectPropertiesWindowBase::ObjectPropertiesWindowBase(wxWindow* parent, const wxString& title, const Map* map, const Tile* tile, Spawn* spawn, wxPoint position /* = wxDefaultPosition */) :
+	wxDialog(parent, wxID_ANY, title, position, wxSize(600, 400), wxCAPTION | wxCLOSE_BOX | wxRESIZE_BORDER),
+	edit_map(map),
+	edit_tile(tile),
+	edit_item(nullptr),
+	edit_creature(nullptr),
+	edit_spawn(spawn) {
+	////
+}
+
+ObjectPropertiesWindowBase::ObjectPropertiesWindowBase(wxWindow* parent, const wxString& title, wxPoint position /* = wxDefaultPosition */) :
+	wxDialog(parent, wxID_ANY, title, position, wxSize(600, 400), wxCAPTION | wxCLOSE_BOX | wxRESIZE_BORDER) {
+	////
+}
+
+Item* ObjectPropertiesWindowBase::getItemBeingEdited() {
+	return edit_item;
+}
+
+// ============================================================================
+// Edit Towns Dialog
+
+BEGIN_EVENT_TABLE(EditTownsDialog, wxDialog)
+EVT_LISTBOX(EDIT_TOWNS_LISTBOX, EditTownsDialog::OnListBoxChange)
+
+EVT_BUTTON(EDIT_TOWNS_SELECT_TEMPLE, EditTownsDialog::OnClickSelectTemplePosition)
+EVT_BUTTON(EDIT_TOWNS_ADD, EditTownsDialog::OnClickAdd)
+EVT_BUTTON(EDIT_TOWNS_REMOVE, EditTownsDialog::OnClickRemove)
+EVT_BUTTON(EDIT_TOWNS_MOVE_UP, EditTownsDialog::OnClickMoveUp)
+EVT_BUTTON(EDIT_TOWNS_MOVE_DOWN, EditTownsDialog::OnClickMoveDown)
+EVT_BUTTON(wxID_OK, EditTownsDialog::OnClickOK)
+EVT_BUTTON(wxID_CANCEL, EditTownsDialog::OnClickCancel)
+END_EVENT_TABLE()
+
+EditTownsDialog::EditTownsDialog(wxWindow* parent, Editor& editor) :
+	wxDialog(parent, wxID_ANY, "Towns", wxDefaultPosition, wxSize(320, 380)),
+	editor(editor),
+	max_town_id(0),
+	current_selection(wxNOT_FOUND) {
+	Map& map = editor.map;
+
+	// Create topsizer
+	wxSizer* sizer = newd wxBoxSizer(wxVERTICAL);
+	wxSizer* tmpsizer;
+
+	for (TownMap::const_iterator town_iter = map.towns.begin(); town_iter != map.towns.end(); ++town_iter) {
+		Town* town = town_iter->second;
+		Town* town_copy = newd Town(*town);
+		town_list.push_back(town_copy);
+		original_town_ids[town_copy] = town->getID();
+		if (max_town_id < town->getID()) {
+			max_town_id = town->getID();
+		}
+	}
+
+	// Town list
+	town_listbox = newd wxListBox(this, EDIT_TOWNS_LISTBOX, wxDefaultPosition, wxSize(240, 100));
+	sizer->Add(town_listbox, 1, wxEXPAND | wxTOP | wxLEFT | wxRIGHT, 10);
+
+	tmpsizer = newd wxBoxSizer(wxHORIZONTAL);
+	tmpsizer->Add(newd wxButton(this, EDIT_TOWNS_ADD, "Add"), 0, wxTOP, 5);
+	tmpsizer->Add(remove_button = newd wxButton(this, EDIT_TOWNS_REMOVE, "Remove"), 0, wxRIGHT | wxTOP, 5);
+	sizer->Add(tmpsizer, 0, wxEXPAND | wxLEFT | wxRIGHT, 10);
+
+	tmpsizer = newd wxBoxSizer(wxHORIZONTAL);
+	tmpsizer->Add(move_up_button = newd wxButton(this, EDIT_TOWNS_MOVE_UP, "Move Up"), 1, wxRIGHT | wxTOP, 5);
+	tmpsizer->Add(move_down_button = newd wxButton(this, EDIT_TOWNS_MOVE_DOWN, "Move Down"), 1, wxTOP, 5);
+	sizer->Add(tmpsizer, 0, wxEXPAND | wxLEFT | wxRIGHT, 10);
+
+	// House options
+	auto* nameBox = newd wxStaticBox(this, wxID_ANY, "Name / ID");
+	tmpsizer = newd wxStaticBoxSizer(nameBox, wxHORIZONTAL);
+	name_field = newd wxTextCtrl(nameBox, wxID_ANY, "", wxDefaultPosition, wxSize(190, 20), 0, wxTextValidator(wxFILTER_ASCII, &town_name));
+	tmpsizer->Add(name_field, 2, wxEXPAND | wxLEFT | wxBOTTOM, 5);
+
+	id_field = newd wxTextCtrl(nameBox, wxID_ANY, "", wxDefaultPosition, wxSize(40, 20), 0, wxTextValidator(wxFILTER_NUMERIC, &town_id));
+	id_field->Enable(false);
+	tmpsizer->Add(id_field, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
+	sizer->Add(tmpsizer, 0, wxEXPAND | wxALL, 10);
+
+	// Temple position
+	temple_position = newd PositionCtrl(this, "Temple Position", 0, 0, 0, map.getWidth(), map.getHeight());
+	select_position_button = newd wxButton(temple_position->GetStaticBox(), EDIT_TOWNS_SELECT_TEMPLE, "Go To");
+	temple_position->Add(select_position_button, 0, wxLEFT | wxRIGHT | wxBOTTOM, 5);
+	sizer->Add(temple_position, 0, wxEXPAND | wxLEFT | wxRIGHT, 10);
+
+	// OK/Cancel buttons
+	tmpsizer = newd wxBoxSizer(wxHORIZONTAL);
+	tmpsizer->Add(newd wxButton(this, wxID_OK, "OK"), wxSizerFlags(1).Center());
+	tmpsizer->Add(newd wxButton(this, wxID_CANCEL, "Cancel"), wxSizerFlags(1).Center());
+	sizer->Add(tmpsizer, 0, wxCENTER | wxALL, 10);
+
+	SetSizerAndFit(sizer);
+	Centre(wxBOTH);
+	BuildListBox(true);
+}
+
+EditTownsDialog::~EditTownsDialog() {
+	for (auto town_iter = town_list.begin(); town_iter != town_list.end(); ++town_iter) {
+		delete *town_iter;
+	}
+}
+
+void EditTownsDialog::BuildListBox(bool doselect) {
+	max_town_id = 0;
+	wxArrayString town_name_list;
+	Town* selected_town = current_selection >= 0 && static_cast<size_t>(current_selection) < town_list.size()
+		? town_list[current_selection]
+		: nullptr;
+
+	for (auto town_iter = town_list.begin(); town_iter != town_list.end(); ++town_iter) {
+		Town* town = *town_iter;
+		wxString label;
+		label << town->getID() << " - " << wxstr(town->getName());
+		town_name_list.Add(label);
+		if (max_town_id < town->getID()) {
+			max_town_id = town->getID();
+		}
+	}
+
+	town_listbox->Set(town_name_list);
+
+	if (doselect) {
+		int selection = town_list.empty() ? wxNOT_FOUND : 0;
+		if (selected_town) {
+			for (size_t index = 0; index < town_list.size(); ++index) {
+				if (town_list[index] == selected_town) {
+					selection = static_cast<int>(index);
+					break;
+				}
+			}
+		}
+		current_selection = wxNOT_FOUND;
+		UpdateSelection(selection);
+	} else {
+		UpdateButtons();
+	}
+}
+
+void EditTownsDialog::SaveCurrentTown() {
+	if (current_selection < 0 || static_cast<size_t>(current_selection) >= town_list.size()) {
+		return;
+	}
+
+	Town* town = town_list[current_selection];
+	town->setName(nstr(name_field->GetValue()));
+	town->setTemplePosition(temple_position->GetPosition());
+
+	if (static_cast<unsigned int>(current_selection) < town_listbox->GetCount()) {
+		wxString label;
+		label << town->getID() << " - " << wxstr(town->getName());
+		town_listbox->SetString(current_selection, label);
+	}
+}
+
+void EditTownsDialog::UpdateButtons() {
+	const bool valid_selection = current_selection >= 0 && static_cast<size_t>(current_selection) < town_list.size();
+	remove_button->Enable(valid_selection);
+	select_position_button->Enable(valid_selection);
+	move_up_button->Enable(valid_selection && current_selection > 0);
+	move_down_button->Enable(valid_selection && static_cast<size_t>(current_selection + 1) < town_list.size());
+}
+
+void EditTownsDialog::UpdateSelection(int new_selection) {
+	SaveCurrentTown();
+
+	town_name.Clear();
+	town_id.Clear();
+
+	if (new_selection >= 0 && static_cast<size_t>(new_selection) < town_list.size()) {
+		current_selection = new_selection;
+		name_field->Enable(true);
+		temple_position->Enable(true);
+
+		Town* town = town_list[new_selection];
+		ASSERT(town);
+
+		town_name << wxstr(town->getName());
+		name_field->SetValue(town_name);
+		town_id << long(town->getID());
+		id_field->SetValue(town_id);
+		temple_position->SetPosition(town->getTemplePosition());
+		town_listbox->SetSelection(new_selection);
+	} else {
+		current_selection = wxNOT_FOUND;
+		name_field->SetValue("");
+		id_field->SetValue("");
+		name_field->Enable(false);
+		temple_position->Enable(false);
+		town_listbox->SetSelection(wxNOT_FOUND);
+	}
+	UpdateButtons();
+	Refresh();
+}
+
+void EditTownsDialog::OnListBoxChange(wxCommandEvent& event) {
+	UpdateSelection(event.GetSelection());
+}
+
+void EditTownsDialog::OnClickSelectTemplePosition(wxCommandEvent& WXUNUSED(event)) {
+	Position templepos = temple_position->GetPosition();
+	g_gui.SetScreenCenterPosition(templepos);
+}
+
+void EditTownsDialog::OnClickAdd(wxCommandEvent& WXUNUSED(event)) {
+	SaveCurrentTown();
+
+	Town* new_town = newd Town(++max_town_id);
+	new_town->setName("Unnamed Town");
+	new_town->setTemplePosition(Position(0, 0, 0));
+	town_list.push_back(new_town);
+
+	current_selection = wxNOT_FOUND;
+	BuildListBox(false);
+	UpdateSelection(static_cast<int>(town_list.size() - 1));
+}
+
+void EditTownsDialog::OnClickRemove(wxCommandEvent& WXUNUSED(event)) {
+	SaveCurrentTown();
+	if (current_selection < 0 || static_cast<size_t>(current_selection) >= town_list.size()) {
+		return;
+	}
+
+	const int selection_index = current_selection;
+	Town* town = town_list[selection_index];
+	const uint32_t original_town_id = GetOriginalTownId(town);
+
+	if (original_town_id != 0) {
+		for (auto house_iter = editor.map.houses.begin(); house_iter != editor.map.houses.end(); ++house_iter) {
+			House* house = house_iter->second;
+			if (house->townid == original_town_id) {
+				g_gui.PopupDialog(this, "Error", "You cannot delete a town which still has houses associated with it.", wxOK);
+				return;
+			}
+		}
+	}
+
+	original_town_ids.erase(town);
+	delete town;
+	town_list.erase(town_list.begin() + selection_index);
+
+	current_selection = wxNOT_FOUND;
+	BuildListBox(false);
+	const int next_selection = town_list.empty()
+		? wxNOT_FOUND
+		: std::min(selection_index, static_cast<int>(town_list.size() - 1));
+	UpdateSelection(next_selection);
+}
+
+uint32_t EditTownsDialog::GetOriginalTownId(const Town* town) const {
+	const auto original = original_town_ids.find(town);
+	return original != original_town_ids.end() ? original->second : 0;
+}
+
+void EditTownsDialog::MoveSelectedTown(int offset) {
+	if (current_selection < 0 || static_cast<size_t>(current_selection) >= town_list.size()) {
+		return;
+	}
+
+	const int target_selection = current_selection + offset;
+	if (target_selection < 0 || static_cast<size_t>(target_selection) >= town_list.size()) {
+		return;
+	}
+
+	SaveCurrentTown();
+	Town* selected_town = town_list[current_selection];
+	Town* displaced_town = town_list[target_selection];
+	const uint32_t selected_id = selected_town->getID();
+	selected_town->setID(displaced_town->getID());
+	displaced_town->setID(selected_id);
+	std::swap(town_list[current_selection], town_list[target_selection]);
+
+	current_selection = wxNOT_FOUND;
+	BuildListBox(false);
+	UpdateSelection(target_selection);
+}
+
+void EditTownsDialog::OnClickMoveUp(wxCommandEvent& WXUNUSED(event)) {
+	MoveSelectedTown(-1);
+}
+
+void EditTownsDialog::OnClickMoveDown(wxCommandEvent& WXUNUSED(event)) {
+	MoveSelectedTown(1);
+}
+
+void EditTownsDialog::OnClickOK(wxCommandEvent& WXUNUSED(event)) {
+	if (!Validate() || !TransferDataFromWindow()) {
+		return;
+	}
+
+	SaveCurrentTown();
+
+	std::set<uint32_t> assigned_ids;
+	std::map<uint32_t, uint32_t> town_id_remap;
+	bool town_ids_changed = false;
+	for (Town* town : town_list) {
+		if (town->getName().empty()) {
+			g_gui.PopupDialog(this, "Error", "You can't have a town with an empty name.", wxOK);
+			return;
+		}
+		if (town->getID() == 0 || !assigned_ids.insert(town->getID()).second) {
+			g_gui.PopupDialog(this, "Error", "Town IDs must be unique and greater than zero.", wxOK);
+			return;
+		}
+		if (!town->getTemplePosition().isValid() || town->getTemplePosition().x > editor.map.getWidth() || town->getTemplePosition().y > editor.map.getHeight()) {
+			wxString msg;
+			msg << "The town " << wxstr(town->getName()) << " has an invalid temple position.";
+			g_gui.PopupDialog(this, "Error", msg, wxOK);
+			return;
+		}
+
+		const uint32_t original_id = GetOriginalTownId(town);
+		if (original_id != 0) {
+			town_id_remap[original_id] = town->getID();
+			town_ids_changed = town_ids_changed || original_id != town->getID();
+		}
+	}
+
+	std::vector<std::pair<House*, uint32_t>> pending_house_updates;
+	for (auto house_iter = editor.map.houses.begin(); house_iter != editor.map.houses.end(); ++house_iter) {
+		House* house = house_iter->second;
+		const auto remap = town_id_remap.find(house->townid);
+		if (remap == town_id_remap.end()) {
+			wxString msg;
+			msg << "House " << house->getID() << " references unknown Town ID " << house->townid << ". No changes were applied.";
+			g_gui.PopupDialog(this, "Error", msg, wxOK);
+			return;
+		}
+		pending_house_updates.emplace_back(house, remap->second);
+	}
+
+	std::vector<std::pair<Depot*, uint16_t>> pending_depot_updates;
+	bool depot_id_overflow = false;
+	bool depot_town_removed = false;
+	auto collect_depot_updates = [&](Map&, Tile*, Item* item, long long) {
+		auto* depot = dynamic_cast<Depot*>(item);
+		if (!depot || depot->getDepotID() == 0) {
+			return;
+		}
+
+		const auto remap = town_id_remap.find(depot->getDepotID());
+		if (remap == town_id_remap.end()) {
+			if (editor.map.towns.getTown(depot->getDepotID()) != nullptr) {
+				depot_town_removed = true;
+			}
+			return;
+		}
+		if (remap->second > std::numeric_limits<uint16_t>::max()) {
+			depot_id_overflow = true;
+			return;
+		}
+		pending_depot_updates.emplace_back(depot, static_cast<uint16_t>(remap->second));
+	};
+	const bool town_reference_structure_changed = town_ids_changed || town_id_remap.size() != editor.map.towns.count();
+	if (town_reference_structure_changed) {
+		foreach_ItemOnMap(editor.map, collect_depot_updates, false);
+	}
+	if (depot_town_removed) {
+		g_gui.PopupDialog(this, "Error", "You cannot delete a town which still has depots associated with it. No changes were applied.", wxOK);
+		return;
+	}
+	if (depot_id_overflow) {
+		g_gui.PopupDialog(this, "Error", "A reordered Town ID does not fit the 16-bit Depot ID format. No changes were applied.", wxOK);
+		return;
+	}
+
+	// Build the complete replacement before touching the active map. Unique IDs
+	// were validated above, so every insertion succeeds and ownership transfers
+	// as one swap below.
+	Towns replacement_towns;
+	for (Town* town : town_list) {
+		const bool added = replacement_towns.addTown(town);
+		ASSERT(added);
+		(void)added;
+	}
+	town_list.clear();
+
+	for (auto town_iter = editor.map.towns.begin(); town_iter != editor.map.towns.end(); ++town_iter) {
+		TileLocation* location = editor.map.getOrCreateTile(town_iter->second->getTemplePosition())->getLocation();
+		if (location->getTownCount() > 0) {
+			location->decreaseTownCount();
+		}
+	}
+	for (auto town_iter = replacement_towns.begin(); town_iter != replacement_towns.end(); ++town_iter) {
+		editor.map.getOrCreateTile(town_iter->second->getTemplePosition())->getLocation()->increaseTownCount();
+	}
+
+	for (const auto& update : pending_house_updates) {
+		update.first->townid = update.second;
+	}
+	for (const auto& update : pending_depot_updates) {
+		update.first->setDepotID(update.second);
+	}
+
+	editor.map.towns.swap(replacement_towns);
+	original_town_ids.clear();
+	editor.map.doChange();
+
+	EndModal(wxID_OK);
+	g_gui.RefreshPalettes();
+	g_gui.RefreshView();
+}
+
+void EditTownsDialog::OnClickCancel(wxCommandEvent& WXUNUSED(event)) {
+	// Just close this window
+	EndModal(wxID_CANCEL);
+}
+
+// ============================================================================
+// Go To Position Dialog
+// Jump to a position on the map by entering XYZ coordinates
+
+BEGIN_EVENT_TABLE(GotoPositionDialog, wxDialog)
+EVT_BUTTON(wxID_OK, GotoPositionDialog::OnClickOK)
+EVT_BUTTON(wxID_CANCEL, GotoPositionDialog::OnClickCancel)
+END_EVENT_TABLE()
+
+GotoPositionDialog::GotoPositionDialog(wxWindow* parent, Editor& editor) :
+	wxDialog(parent, wxID_ANY, "Go To Position", wxDefaultPosition, wxDefaultSize),
+	editor(editor) {
+	Map& map = editor.map;
+
+	// create topsizer
+	wxSizer* sizer = newd wxBoxSizer(wxVERTICAL);
+
+	posctrl = newd PositionCtrl(this, "Destination", map.getWidth() / 2, map.getHeight() / 2, GROUND_LAYER, map.getWidth(), map.getHeight());
+	sizer->Add(posctrl, 0, wxTOP | wxLEFT | wxRIGHT, 20);
+
+	// OK/Cancel buttons
+	wxSizer* tmpsizer = newd wxBoxSizer(wxHORIZONTAL);
+	tmpsizer->Add(newd wxButton(this, wxID_OK, "OK"), wxSizerFlags(1).Center());
+	tmpsizer->Add(newd wxButton(this, wxID_CANCEL, "Cancel"), wxSizerFlags(1).Center());
+	sizer->Add(tmpsizer, 0, wxALL | wxCENTER, 20); // Border to top too
+
+	SetSizerAndFit(sizer);
+	Centre(wxBOTH);
+}
+
+void GotoPositionDialog::OnClickCancel(wxCommandEvent&) {
+	EndModal(0);
+}
+
+void GotoPositionDialog::OnClickOK(wxCommandEvent&) {
+	g_gui.SetScreenCenterPosition(posctrl->GetPosition());
+	EndModal(1);
+}

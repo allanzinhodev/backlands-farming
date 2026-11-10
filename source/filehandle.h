@@ -1,0 +1,460 @@
+//////////////////////////////////////////////////////////////////////
+// This file is part of Remere's Map Editor
+//////////////////////////////////////////////////////////////////////
+// Remere's Map Editor is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Remere's Map Editor is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+//////////////////////////////////////////////////////////////////////
+
+#ifndef RME_FILEHANDLE_H_
+#define RME_FILEHANDLE_H_
+
+#include "definitions.h"
+
+#include <stdexcept>
+#include <string>
+#include <cstdint>
+#include <stack>
+#include <vector>
+#include <stdio.h>
+#include <cstring>
+
+#ifndef FORCEINLINE
+	#ifdef _MSV_VER
+		#define FORCEINLINE __forceinline
+	#else
+		#define FORCEINLINE inline
+	#endif
+#endif
+
+enum FileHandleError {
+	FILE_NO_ERROR,
+	FILE_COULD_NOT_OPEN,
+	FILE_INVALID_IDENTIFIER,
+	FILE_STRING_TOO_LONG,
+	FILE_READ_ERROR,
+	FILE_WRITE_ERROR,
+	FILE_SYNTAX_ERROR,
+	FILE_PREMATURE_END,
+};
+
+enum NodeType {
+	NODE_START = 0xfe,
+	NODE_END = 0xff,
+	ESCAPE_CHAR = 0xfd,
+};
+
+// Deepest node a reader accepts below the root, matching IO::Walk in the
+// migration parser. Node nesting costs 2 bytes per level in a file, and every
+// consumer recurses over it, so it has to be bounded before it reaches them.
+constexpr uint32_t MAX_NODE_DEPTH = 256;
+
+class FileHandle {
+public:
+	FileHandle() :
+		error_code(FILE_NO_ERROR), file(nullptr) { }
+	virtual ~FileHandle() {
+		close();
+	}
+
+	FileHandle(const FileHandle&) = delete;
+	FileHandle& operator=(const FileHandle&) = delete;
+
+	virtual void close();
+	virtual bool isOpen() {
+		return file != nullptr;
+	}
+	virtual bool isOk() {
+		return isOpen() && error_code == FILE_NO_ERROR && ferror(file) == 0;
+	}
+	std::string getErrorMessage();
+
+public:
+	FileHandleError error_code;
+	FILE* file;
+};
+
+class FileReadHandle : public FileHandle {
+public:
+	explicit FileReadHandle(const std::string& name);
+	~FileReadHandle() override;
+
+	FORCEINLINE bool getU8(uint8_t& u8) {
+		return getType(u8);
+	}
+	FORCEINLINE bool getByte(uint8_t& u8) {
+		return getType(u8);
+	}
+	FORCEINLINE bool getSByte(int8_t& i8) {
+		return getType(i8);
+	}
+	FORCEINLINE bool getU16(uint16_t& u16) {
+		return getType(u16);
+	}
+	FORCEINLINE bool getU32(uint32_t& u32) {
+		return getType(u32);
+	}
+	FORCEINLINE bool get32(int32_t& i32) {
+		return getType(i32);
+	}
+	bool getRAW(uint8_t* ptr, size_t sz);
+	bool getRAW(std::string& str, size_t sz);
+	bool getString(std::string& str);
+	bool getLongString(std::string& str);
+
+	void close() override;
+	bool seek(size_t offset);
+	bool seekRelative(size_t offset);
+	FORCEINLINE void skip(size_t offset) {
+		seekRelative(offset);
+	}
+	size_t size() {
+		return file_size;
+	}
+	size_t tell() {
+		if (file) {
+			return ftell(file);
+		}
+		return 0;
+	}
+
+protected:
+	size_t file_size;
+
+	template <class T>
+	bool getType(T& ref) {
+		const size_t numRead = fread(&ref, sizeof(ref), 1, file);
+		return numRead == 1 && ferror(file) == 0;
+	}
+};
+
+class NodeFileReadHandle;
+class DiskNodeFileReadHandle;
+class MemoryNodeFileReadHandle;
+
+class BinaryNode {
+public:
+	BinaryNode(NodeFileReadHandle* file, BinaryNode* parent);
+	~BinaryNode();
+
+	FORCEINLINE bool getU8(uint8_t& u8) {
+		return getType(u8);
+	}
+	FORCEINLINE bool getByte(uint8_t& u8) {
+		return getType(u8);
+	}
+	FORCEINLINE bool getU16(uint16_t& u16) {
+		return getType(u16);
+	}
+	FORCEINLINE bool getU32(uint32_t& u32) {
+		return getType(u32);
+	}
+	FORCEINLINE bool getU64(uint64_t& u64) {
+		return getType(u64);
+	}
+	FORCEINLINE bool skip(size_t sz) {
+		if (sz > data.size() - read_offset) {
+			read_offset = data.size();
+			return false;
+		}
+		read_offset += sz;
+		return true;
+	}
+	size_t tell() const {
+		return read_offset;
+	}
+	bool seek(size_t offset) {
+		if (offset > data.size()) {
+			return false;
+		}
+		read_offset = offset;
+		return true;
+	}
+	bool getRAW(uint8_t* ptr, size_t sz);
+	bool getRAW(std::string& str, size_t sz);
+	bool getString(std::string& str);
+	bool getLongString(std::string& str);
+	[[nodiscard]] const std::string& getNodeData() const {
+		return data;
+	}
+
+	BinaryNode* getChild();
+	// Returns this on success, nullptr on failure
+	BinaryNode* advance();
+
+protected:
+	template <class T>
+	bool getType(T& ref) {
+		if (sizeof(ref) > data.size() - read_offset) {
+			read_offset = data.size();
+			return false;
+		}
+		// Node payloads are packed, so a value can start at any offset.
+		memcpy(&ref, data.data() + read_offset, sizeof(ref));
+
+		read_offset += sizeof(ref);
+		return true;
+	}
+
+	void load();
+	void skipChildren();
+	BinaryNode* readNextSibling();
+	std::string data;
+	size_t read_offset;
+	NodeFileReadHandle* file;
+	BinaryNode* parent;
+	BinaryNode* child;
+	uint32_t depth;
+
+	friend class DiskNodeFileReadHandle;
+	friend class MemoryNodeFileReadHandle;
+};
+
+class NodeFileReadHandle : public FileHandle {
+public:
+	NodeFileReadHandle();
+	~NodeFileReadHandle() override;
+
+	virtual BinaryNode* getRootNode() = 0;
+
+	virtual size_t size() = 0;
+	virtual size_t tell() = 0;
+
+protected:
+	BinaryNode* getNode(BinaryNode* parent);
+	void freeNode(BinaryNode* node);
+	// Returns false when end-of-file is reached
+	virtual bool renewCache() = 0;
+
+	bool last_was_start;
+	uint8_t* cache;
+	size_t cache_size;
+	size_t cache_length;
+	size_t local_read_index;
+
+	BinaryNode* root_node;
+
+	std::stack<void*> unused;
+
+	friend class BinaryNode;
+};
+
+class DiskNodeFileReadHandle : public NodeFileReadHandle {
+public:
+	DiskNodeFileReadHandle(const std::string& name, const std::vector<std::string>& acceptable_identifiers);
+	~DiskNodeFileReadHandle() override;
+
+	void close() override;
+	BinaryNode* getRootNode() override;
+
+	size_t size() override {
+		return file_size;
+	}
+	size_t tell() override {
+		if (file) {
+			return ftell(file);
+		}
+		return 0;
+	}
+
+protected:
+	bool renewCache() override;
+
+	size_t file_size;
+};
+
+class MemoryNodeFileReadHandle : public NodeFileReadHandle {
+public:
+	// Does NOT claim ownership of the memory it is given.
+	MemoryNodeFileReadHandle(const uint8_t* data, size_t size);
+	~MemoryNodeFileReadHandle() override;
+
+	void assign(const uint8_t* data, size_t sz);
+
+	void close() override;
+	BinaryNode* getRootNode() override;
+
+	size_t size() override {
+		return cache_size;
+	}
+	size_t tell() override {
+		return local_read_index;
+	}
+	bool isOk() override {
+		return error_code == FILE_NO_ERROR;
+	}
+
+protected:
+	bool renewCache() override;
+
+	uint8_t* index;
+};
+
+class FileWriteHandle : public FileHandle {
+public:
+	explicit FileWriteHandle(const std::string& name);
+	~FileWriteHandle() override;
+
+	FORCEINLINE bool addU8(uint8_t u8) {
+		return addType(u8);
+	}
+	FORCEINLINE bool addByte(uint8_t u8) {
+		return addType(u8);
+	}
+	FORCEINLINE bool addU16(uint16_t u16) {
+		return addType(u16);
+	}
+	FORCEINLINE bool addU32(uint32_t u32) {
+		return addType(u32);
+	}
+	FORCEINLINE bool addU64(uint64_t u64) {
+		return addType(u64);
+	}
+	bool addString(const std::string& str);
+	bool addString(const char* str);
+	bool addLongString(const std::string& str);
+	bool addRAW(const std::string& str);
+	bool addRAW(const uint8_t* ptr, size_t sz);
+	bool addRAW(const char* c) {
+		return addRAW(reinterpret_cast<const uint8_t*>(c), strlen(c));
+	}
+
+	// Random-access helpers (OTMM minimap export rewrites the header offset).
+	bool seek(size_t offset, int origin = SEEK_SET);
+	size_t tell();
+
+protected:
+	template <class T>
+	bool addType(T ref) {
+		fwrite(&ref, sizeof(ref), 1, file);
+		return ferror(file) == 0;
+	}
+};
+
+class NodeFileWriteHandle : public FileHandle {
+public:
+	NodeFileWriteHandle();
+	~NodeFileWriteHandle() override;
+
+	bool addNode(uint8_t nodetype);
+	bool endNode();
+
+	bool addU8(uint8_t u8);
+	bool addByte(uint8_t u8);
+	bool addU16(uint16_t u16);
+	bool addU32(uint32_t u32);
+	bool addU64(uint64_t u64);
+	bool addString(const std::string& str);
+	bool addLongString(const std::string& str);
+	bool addRAW(const std::string& str);
+	bool addRAW(const uint8_t* ptr, size_t sz);
+	bool addRAW(const char* c) {
+		return addRAW(reinterpret_cast<const uint8_t*>(c), strlen(c));
+	}
+
+protected:
+	virtual void renewCache() = 0;
+
+	static uint8_t NODE_START;
+	static uint8_t NODE_END;
+	static uint8_t ESCAPE_CHAR;
+
+	uint8_t* cache;
+	size_t cache_size;
+	size_t local_write_index;
+
+	FORCEINLINE void writeRawBytes(const uint8_t* ptr, size_t sz) {
+		while (sz != 0) {
+			if (local_write_index >= cache_size) {
+				renewCache();
+			}
+
+			const size_t available = cache_size - local_write_index;
+			const size_t writable = sz < available ? sz : available;
+			memcpy(cache + local_write_index, ptr, writable);
+			local_write_index += writable;
+			ptr += writable;
+			sz -= writable;
+		}
+	}
+
+	FORCEINLINE void writeCacheByte(uint8_t byte) {
+		if (local_write_index >= cache_size) {
+			renewCache();
+		}
+
+		cache[local_write_index++] = byte;
+	}
+
+	FORCEINLINE void writeEscapedByte(uint8_t byte) {
+		writeCacheByte(ESCAPE_CHAR);
+		writeCacheByte(byte);
+	}
+
+	FORCEINLINE void writeBytes(const uint8_t* ptr, size_t sz) {
+		while (sz != 0) {
+			size_t plain_size = 0;
+			while (plain_size < sz) {
+				const uint8_t byte = ptr[plain_size];
+				if (byte == NODE_START || byte == NODE_END || byte == ESCAPE_CHAR) {
+					break;
+				}
+				++plain_size;
+			}
+
+			writeRawBytes(ptr, plain_size);
+			ptr += plain_size;
+			sz -= plain_size;
+
+			if (sz == 0) {
+				break;
+			}
+
+			writeEscapedByte(*ptr);
+			++ptr;
+			--sz;
+		}
+	}
+};
+
+class DiskNodeFileWriteHandle : public NodeFileWriteHandle {
+public:
+	DiskNodeFileWriteHandle(const std::string& name, const std::string& identifier);
+	~DiskNodeFileWriteHandle() override;
+
+	void close() override;
+
+protected:
+	void renewCache() override;
+};
+
+class MemoryNodeFileWriteHandle : public NodeFileWriteHandle {
+public:
+	MemoryNodeFileWriteHandle();
+	~MemoryNodeFileWriteHandle() override;
+
+	void reset();
+	void rewind() {
+		local_write_index = 0;
+	}
+	void close() override;
+
+	size_t getSize();
+	const uint8_t* getData() const {
+		return cache;
+	}
+
+protected:
+	void renewCache() override;
+};
+
+#endif

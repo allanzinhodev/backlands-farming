@@ -1,0 +1,208 @@
+//////////////////////////////////////////////////////////////////////
+// This file is part of Remere's Map Editor
+//////////////////////////////////////////////////////////////////////
+// Remere's Map Editor is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Remere's Map Editor is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+//////////////////////////////////////////////////////////////////////
+
+#ifndef RME_PALETTE_COMMONS_H_
+#define RME_PALETTE_COMMONS_H_
+
+#include "main.h"
+
+#include <wx/listctrl.h>
+
+#include "dcbutton.h"
+#include "tileset.h"
+#include "gui_ids.h"
+#include "common_windows.h"
+
+class Map;
+class PaletteWindow;
+
+typedef TilesetCategoryType PaletteType;
+
+static constexpr int PALETTE_DELAYED_REFRESH_MS = 300;
+
+// Walks up the parent chain and returns the enclosing PaletteWindow (or nullptr).
+PaletteWindow* GetParentPalette(const wxWindow* window);
+
+class PalettePanel : public wxPanel {
+public:
+	PalettePanel(wxWindow* parent, wxWindowID id = wxID_ANY, long style = wxTAB_TRAVERSAL);
+	~PalettePanel() override;
+
+	// Interface
+	// Flushes this panel and consequent views will feature reloaded data
+	virtual void InvalidateContents();
+	// Loads the currently displayed page
+	virtual void LoadCurrentContents();
+	// Loads all content in this panel
+	virtual void LoadAllContents();
+
+	PaletteWindow* GetParentPalette() const;
+	wxString GetName() const override;
+	virtual PaletteType GetType() const;
+
+	// Add a tool panel!
+	virtual void AddToolPanel(PalettePanel* panel);
+	// Sets the style for this toolbar and child toolabrs
+	virtual void SetToolbarIconSize(bool large_icons);
+
+	// Select the first brush
+	virtual void SelectFirstBrush();
+	// Returns the currently selected brush (First brush if panel is not loaded)
+	virtual Brush* GetSelectedBrush() const;
+	// Returns the currently selected brush size
+	virtual int GetSelectedBrushSize() const;
+	// Select the brush in the parameter, this only changes the look of the panel
+	virtual bool SelectBrush(const Brush* whatbrush);
+
+	virtual void DeselectAll() { }
+
+	// Updates the palette window to use the current brush size
+	virtual void OnUpdateBrushSize(BrushShape shape, int size);
+	// Called when this page is about to be displayed
+	virtual void OnSwitchIn();
+	// Called when this page is hidden
+	virtual void OnSwitchOut();
+	// Called sometimes
+	virtual void OnUpdate();
+	// When the palette should do a delayed refresh (necessary for multiple palettes)
+	void OnRefreshTimer(wxTimerEvent&);
+
+protected:
+	typedef std::vector<PalettePanel*> ToolBarList;
+	ToolBarList tool_bars;
+	wxTimer refresh_timer;
+	int last_brush_size;
+
+	DECLARE_EVENT_TABLE();
+};
+
+// Shared base for simple "named entity" list palettes (e.g. Waypoints, Zones):
+// a single-selection, editable, header-less list with Add/Remove buttons.
+class NamedEntityPalettePanel : public PalettePanel {
+public:
+	NamedEntityPalettePanel(wxWindow* parent, wxWindowID id = wxID_ANY);
+
+	void SelectFirstBrush() override;
+	int GetSelectedBrushSize() const override;
+	void OnSwitchIn() override;
+	void OnSwitchOut() override;
+
+protected:
+	// Creates the standard single-selection, editable, header-less list control.
+	wxListCtrl* createEntityList(wxWindow* parent, wxWindowID listId);
+
+	// Disables hotkeys before inline label editing begins.
+	void OnBeginEditLabel(wxListEvent& event);
+
+	// Returns the index of the selected item in the list, or -1 if none.
+	static long getSelectedIndex(wxListCtrl* list);
+
+	// Returns the text of the item at the given index.
+	static std::string getSelectedName(wxListCtrl* list, long index);
+
+	Map* map;
+};
+
+class BrushSizePanel : public PalettePanel {
+public:
+	BrushSizePanel(wxWindow* parent);
+	~BrushSizePanel() override { }
+
+	// Interface
+	// Flushes this panel and consequent views will feature reloaded data
+	void InvalidateContents() override;
+	// Loads the currently displayed page
+	void LoadCurrentContents() override;
+	// Loads all content in this panel
+	void LoadAllContents() override;
+
+	wxString GetName() const override;
+	void SetToolbarIconSize(bool large) override;
+
+	// Updates the palette window to use the current brush size
+	void OnUpdateBrushSize(BrushShape shape, int size) override;
+	// Called when this page is displayed
+	void OnSwitchIn() override;
+
+	// wxWidgets event handling
+	void OnClickSquareBrush(wxCommandEvent& event);
+	void OnClickCircleBrush(wxCommandEvent& event);
+
+	void OnClickBrushSize(int which);
+	void OnClickBrushSize0(wxCommandEvent& event) {
+		OnClickBrushSize(0);
+	}
+	void OnClickBrushSize1(wxCommandEvent& event) {
+		OnClickBrushSize(1);
+	}
+	void OnClickBrushSize2(wxCommandEvent& event) {
+		OnClickBrushSize(2);
+	}
+	void OnClickBrushSize4(wxCommandEvent& event) {
+		OnClickBrushSize(4);
+	}
+	void OnClickBrushSize6(wxCommandEvent& event) {
+		OnClickBrushSize(6);
+	}
+	void OnClickBrushSize8(wxCommandEvent& event) {
+		OnClickBrushSize(8);
+	}
+	void OnClickBrushSize11(wxCommandEvent& event) {
+		OnClickBrushSize(11);
+	}
+
+protected:
+	bool loaded;
+	bool large_icons;
+
+	DCButton* brushshapeSquareButton;
+	DCButton* brushshapeCircleButton;
+
+	DCButton* brushsize0Button;
+	DCButton* brushsize1Button;
+	DCButton* brushsize2Button;
+	DCButton* brushsize4Button;
+	DCButton* brushsize6Button;
+	DCButton* brushsize8Button;
+	DCButton* brushsize11Button;
+
+	DECLARE_EVENT_TABLE()
+};
+
+class BrushThicknessPanel : public PalettePanel {
+public:
+	BrushThicknessPanel(wxWindow* parent);
+	~BrushThicknessPanel() override;
+
+	// Interface
+	wxString GetName() const override;
+
+	// Called when this page is displayed
+	void OnSwitchIn() override;
+
+	// wxWidgets event handling
+	void OnScroll(wxScrollEvent& event);
+	void OnClickCustomThickness(wxCommandEvent& event);
+
+public:
+	wxSlider* slider;
+	wxCheckBox* use_button;
+
+	DECLARE_EVENT_TABLE()
+};
+
+#endif

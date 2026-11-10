@@ -1,0 +1,943 @@
+cmake_minimum_required(VERSION 3.19)
+
+# Let CMake select the MSVC runtime through CMAKE_MSVC_RUNTIME_LIBRARY. This
+# must be set before project() so static vcpkg triplets can use /MT consistently.
+if(POLICY CMP0091)
+	cmake_policy(SET CMP0091 NEW)
+endif()
+
+project(nexamap)
+
+include(CTest)
+include(GNUInstallDirs)
+include(CheckCXXCompilerFlag)
+include(CheckPIESupported)
+if(UNIX AND NOT APPLE)
+	# Keep vcpkg's static codec symbols private. GTK's shared pixbuf loaders
+	# must resolve PNG/JPEG functions from their own system libraries.
+	add_link_options("LINKER:--exclude-libs,ALL")
+	set(NEXAMAP_DATA_DIR "${CMAKE_INSTALL_DATADIR}/nexamap")
+	file(RELATIVE_PATH NEXAMAP_DATA_FROM_BINDIR "${CMAKE_INSTALL_FULL_BINDIR}" "${CMAKE_INSTALL_FULL_DATADIR}/nexamap")
+	add_compile_definitions(
+		NEXAMAP_INSTALL_DATA_DIR="${CMAKE_INSTALL_FULL_DATADIR}/nexamap"
+		NEXAMAP_INSTALL_DATA_FROM_BINDIR="${NEXAMAP_DATA_FROM_BINDIR}"
+	)
+endif()
+
+option(ENABLE_UNITY_BUILD "Enable unity build for faster compilation" ON)
+
+if(MSVC AND VCPKG_TARGET_TRIPLET MATCHES "-windows-static$")
+	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
+if(NOT CMAKE_BUILD_TYPE)
+	set(CMAKE_BUILD_TYPE RelWithDebInfo)
+endif()
+
+option(ENABLE_HARDENING "Enable compiler and linker hardening flags" ON)
+option(ENABLE_SANITIZERS "Build with ASan and UBSan; turns hardening off (Linux)" OFF)
+option(ENABLE_LTO "Enable link-time optimization in optimized builds" OFF)
+
+# ASSERT() and the wxWidgets-independent debug helpers follow __DEBUG__. Release
+# stays NDEBUG through CMAKE_CXX_FLAGS_RELEASE; test targets opt in further down.
+add_compile_definitions($<$<CONFIG:Debug>:__DEBUG__>)
+
+if(ENABLE_SANITIZERS)
+	if(MSVC)
+		message(FATAL_ERROR "ENABLE_SANITIZERS supports GCC and Clang only")
+	endif()
+	add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer)
+	add_link_options(-fsanitize=address,undefined)
+endif()
+
+if(ENABLE_LTO)
+	include(CheckIPOSupported)
+	check_ipo_supported()
+	set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+endif()
+
+# Warnings stay advisory: there is no -Werror or /WX. Unused parameters are
+# mostly wx event handlers and virtual overrides, so they are not reported.
+add_library(nexamap_warnings INTERFACE)
+if(MSVC)
+	target_compile_options(nexamap_warnings INTERFACE /W4 /wd4100)
+else()
+	target_compile_options(nexamap_warnings INTERFACE -Wall -Wextra -Wno-unused-parameter)
+endif()
+
+# Explicit so that the result does not depend on a distribution's compiler
+# defaults. FORTIFY cannot be combined with ASan, so sanitizer builds skip this.
+add_library(nexamap_hardening INTERFACE)
+if(ENABLE_HARDENING AND NOT ENABLE_SANITIZERS)
+	if(MSVC)
+		# /sdl turns C4996 into an error, and wx deprecations are not actionable here.
+		target_compile_options(nexamap_hardening INTERFACE /GS /sdl /wd4996 $<$<NOT:$<CONFIG:Debug>>:/guard:cf>)
+		target_compile_definitions(nexamap_hardening INTERFACE _CRT_SECURE_NO_WARNINGS)
+		target_link_options(nexamap_hardening INTERFACE /DYNAMICBASE /NXCOMPAT /CETCOMPAT $<$<NOT:$<CONFIG:Debug>>:/guard:cf>)
+		if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+			target_link_options(nexamap_hardening INTERFACE /HIGHENTROPYVA)
+		endif()
+	elseif(UNIX)
+		set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+		check_pie_supported()
+		target_compile_options(nexamap_hardening INTERFACE
+			-fstack-protector-strong
+			$<$<NOT:$<CONFIG:Debug>>:-U_FORTIFY_SOURCE>
+			$<$<NOT:$<CONFIG:Debug>>:-D_FORTIFY_SOURCE=3>
+		)
+		foreach(flag IN ITEMS -fstack-clash-protection -fcf-protection)
+			string(MAKE_C_IDENTIFIER "NEXAMAP_HAS${flag}" flag_variable)
+			check_cxx_compiler_flag(${flag} ${flag_variable})
+			if(${flag_variable})
+				target_compile_options(nexamap_hardening INTERFACE ${flag})
+			endif()
+		endforeach()
+		if(NOT APPLE)
+			target_link_options(nexamap_hardening INTERFACE LINKER:-z,relro LINKER:-z,now LINKER:-z,noexecstack)
+		endif()
+	endif()
+endif()
+
+find_package(fmt CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
+find_package(glad CONFIG REQUIRED)
+find_package(liblzma CONFIG REQUIRED)
+find_package(pugixml CONFIG REQUIRED)
+find_package(Protobuf CONFIG QUIET)
+if(NOT Protobuf_FOUND)
+	find_package(Protobuf REQUIRED)
+endif()
+
+find_package(OpenGL REQUIRED)
+find_package(Threads REQUIRED)
+if(NOT WIN32)
+	find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+endif()
+
+# LibArchive support is disabled by default. To enable OTGZ support, define
+# OTGZ_SUPPORT in source/definitions.h and add LibArchive back to the build.
+# if(APPLE)
+#     set(CMAKE_PREFIX_PATH /usr/local/opt/libarchive)
+# endif()
+# find_package(LibArchive REQUIRED)
+
+find_package(wxWidgets COMPONENTS html aui gl adv core net base REQUIRED)
+
+find_package(ZLIB REQUIRED)
+
+if(wxWidgets_USE_FILE)
+	include(${wxWidgets_USE_FILE})
+endif()
+
+# The editor never needs XPath, so its API stays out of reach of project code.
+add_library(nexamap_pugixml INTERFACE)
+target_link_libraries(nexamap_pugixml INTERFACE pugixml::pugixml)
+target_compile_definitions(nexamap_pugixml INTERFACE PUGIXML_NO_XPATH)
+
+add_library(map_migration_core STATIC
+	source/map_migration/migration_io.cpp
+	source/map_migration/classic_resource_catalog.cpp
+	source/map_migration/map_inventory.cpp
+	source/map_migration/cross_client_matcher.cpp
+	source/map_migration/map_migration_engine.cpp
+)
+target_include_directories(map_migration_core PUBLIC source)
+target_compile_features(map_migration_core PUBLIC cxx_std_20)
+target_link_libraries(map_migration_core PUBLIC nexamap_pugixml PRIVATE nlohmann_json::nlohmann_json)
+if(MSVC)
+	target_compile_options(map_migration_core PRIVATE /utf-8 /bigobj)
+endif()
+add_subdirectory(source/protobuf)
+include(source/CMakeLists.txt)
+if(WIN32)
+	list(APPEND rme_SRC "${CMAKE_CURRENT_SOURCE_DIR}/vcproj/Project/Editor.rc")
+endif()
+add_executable(${PROJECT_NAME} ${rme_H} ${rme_SRC})
+
+set_target_properties(${PROJECT_NAME} PROPERTIES CXX_STANDARD 20)
+set_target_properties(${PROJECT_NAME} PROPERTIES CXX_STANDARD_REQUIRED ON)
+set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "NexaMap Editor")
+if(MSVC)
+	target_compile_options(${PROJECT_NAME} PRIVATE /bigobj /utf-8)
+endif()
+if(WIN32)
+	# Keep a console in Release too, as in RME Redux, for startup/crash output.
+	set_target_properties(${PROJECT_NAME} PROPERTIES WIN32_EXECUTABLE FALSE)
+endif()
+if(ENABLE_UNITY_BUILD)
+	if(CMAKE_VERSION VERSION_LESS 3.16)
+		message(WARNING "ENABLE_UNITY_BUILD requires CMake 3.16 or newer; continuing without unity build")
+	else()
+		set_source_files_properties(
+			# Converter implementations have overlapping private helper names.
+			"${CMAKE_CURRENT_SOURCE_DIR}/source/items_otb_id_converter.cpp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/source/custom_server_converter.cpp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/source/gl_renderer.cpp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/source/post_process_renderer.cpp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/source/spawn_format_map.cpp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/source/spawn_format.cpp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/source/procedural_map_generator.cpp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/source/procedural_map_generator_window.cpp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/source/minimap_import_window.cpp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/source/png_map_import.cpp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/source/png_map_import_window.cpp"
+			PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON
+		)
+		set_target_properties(${PROJECT_NAME} PROPERTIES
+			UNITY_BUILD ON
+			UNITY_BUILD_BATCH_SIZE 8
+		)
+	endif()
+endif()
+
+include_directories(${OPENGL_INCLUDE_DIR} ${ZLIB_INCLUDE_DIR}
+	$<TARGET_PROPERTY:fmt::fmt,INTERFACE_INCLUDE_DIRECTORIES>
+	$<TARGET_PROPERTY:nlohmann_json::nlohmann_json,INTERFACE_INCLUDE_DIRECTORIES>
+)
+target_link_libraries(${PROJECT_NAME}
+	${wxWidgets_LIBRARIES}
+	${OPENGL_LIBRARIES}
+	Threads::Threads
+	${CMAKE_DL_LIBS}
+	${ZLIB_LIBRARIES}
+	glad::glad
+	fmt::fmt
+	nlohmann_json::nlohmann_json
+	liblzma::liblzma
+	nexamap_protobuf
+	map_migration_core
+)
+if(MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+	# 32-bit builds load large maps, so use the full 4 GB user address space.
+	target_link_options(${PROJECT_NAME} PRIVATE /LARGEADDRESSAWARE)
+endif()
+
+if(UNIX AND NOT APPLE)
+	install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+else()
+	install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION .)
+endif()
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_directory
+		"${CMAKE_CURRENT_SOURCE_DIR}/data"
+		"$<TARGET_FILE_DIR:${PROJECT_NAME}>/data"
+		COMMENT "Copying data directory to build output directory"
+	)
+if(WIN32)
+	target_compile_definitions(${PROJECT_NAME} PRIVATE "_WIN32_WINNT=0x0601")
+	target_link_libraries(${PROJECT_NAME} bcrypt ws2_32)
+else()
+	target_link_libraries(${PROJECT_NAME} OpenSSL::Crypto)
+endif()
+
+if(BUILD_TESTING)
+	add_executable(cross_client_match_policy_tests tests/cross_client_match_policy_tests.cpp)
+	target_include_directories(cross_client_match_policy_tests PRIVATE source)
+	target_compile_features(cross_client_match_policy_tests PRIVATE cxx_std_20)
+	add_test(NAME cross_client_match_policy_tests COMMAND cross_client_match_policy_tests)
+
+	add_executable(map_migration_tests tests/map_migration_tests.cpp)
+	target_link_libraries(map_migration_tests PRIVATE map_migration_core)
+	add_test(NAME map_migration_tests COMMAND map_migration_tests)
+	if(MSVC)
+		target_compile_options(map_migration_tests PRIVATE /utf-8)
+	endif()
+	add_executable(map_migration_tool tools/map_migration_tool.cpp)
+	target_link_libraries(map_migration_tool PRIVATE map_migration_core)
+	if(MSVC)
+		target_compile_options(map_migration_tool PRIVATE /utf-8)
+	endif()
+
+	add_executable(playtest_controller_tests tests/playtest_controller_tests.cpp source/ingame_preview/playtest_controller.cpp source/ingame_preview/playtest_weather.cpp)
+	target_include_directories(playtest_controller_tests PRIVATE source)
+	target_compile_features(playtest_controller_tests PRIVATE cxx_std_20)
+	add_test(NAME playtest_controller_tests COMMAND playtest_controller_tests)
+
+	add_executable(mcp_protocol_tests
+		tests/mcp_protocol_tests.cpp
+		source/mcp/mcp_common.cpp
+		source/mcp/mcp_protocol.cpp
+		source/mcp/mcp_registry.cpp
+	)
+	target_include_directories(mcp_protocol_tests PRIVATE source)
+	target_link_libraries(mcp_protocol_tests PRIVATE nlohmann_json::nlohmann_json)
+	target_compile_features(mcp_protocol_tests PRIVATE cxx_std_20)
+	if(MSVC)
+		target_compile_options(mcp_protocol_tests PRIVATE /utf-8)
+	endif()
+	add_test(NAME mcp_protocol_tests COMMAND mcp_protocol_tests)
+
+	add_executable(mcp_security_tests
+		tests/mcp_security_tests.cpp
+		source/mcp/mcp_common.cpp
+		source/mcp/mcp_protocol.cpp
+		source/mcp/mcp_registry.cpp
+		source/mcp/mcp_server.cpp
+		source/multiplayer_crypto.cpp
+		source/multiplayer_protocol.cpp
+	)
+	target_include_directories(mcp_security_tests PRIVATE source)
+	target_link_libraries(mcp_security_tests PRIVATE nlohmann_json::nlohmann_json)
+	if(WIN32)
+		target_link_libraries(mcp_security_tests PRIVATE bcrypt ws2_32)
+	else()
+		target_link_libraries(mcp_security_tests PRIVATE OpenSSL::Crypto)
+	endif()
+	target_compile_features(mcp_security_tests PRIVATE cxx_std_20)
+	if(MSVC)
+		target_compile_options(mcp_security_tests PRIVATE /utf-8)
+	endif()
+	add_test(NAME mcp_security_tests COMMAND mcp_security_tests)
+
+	# All full-editor test harnesses use the same source definitions and options.
+	# Compile their editor sources once rather than once per executable.
+	add_library(editor_test_objects OBJECT ${rme_SRC})
+	target_include_directories(editor_test_objects PUBLIC source)
+	target_compile_features(editor_test_objects PUBLIC cxx_std_20)
+	target_compile_definitions(editor_test_objects PUBLIC NEXAMAP_MULTIPLAYER_TESTS)
+	target_link_libraries(editor_test_objects PUBLIC ${wxWidgets_LIBRARIES} ${OPENGL_LIBRARIES} ${CMAKE_DL_LIBS} Threads::Threads ${ZLIB_LIBRARIES} glad::glad fmt::fmt nlohmann_json::nlohmann_json liblzma::liblzma nexamap_protobuf map_migration_core)
+	set_target_properties(editor_test_objects PROPERTIES UNITY_BUILD ${ENABLE_UNITY_BUILD} UNITY_BUILD_BATCH_SIZE 8)
+	if(MSVC)
+		target_compile_options(editor_test_objects PUBLIC /bigobj /utf-8)
+		target_compile_definitions(editor_test_objects PUBLIC "_WIN32_WINNT=0x0601")
+		target_link_libraries(editor_test_objects PUBLIC bcrypt iphlpapi ws2_32)
+	else()
+		target_link_libraries(editor_test_objects PUBLIC OpenSSL::Crypto)
+	endif()
+
+	add_executable(quick_replace_selection_tests tests/quick_replace_selection_test_main.cpp tests/quick_replace_selection_tests.cpp)
+	target_link_libraries(quick_replace_selection_tests PRIVATE editor_test_objects)
+	add_test(NAME quick_replace_selection_tests COMMAND quick_replace_selection_tests)
+	set_tests_properties(quick_replace_selection_tests PROPERTIES TIMEOUT 30)
+
+	add_executable(waypoint_groups_tests tests/waypoint_groups_tests.cpp)
+	target_link_libraries(waypoint_groups_tests PRIVATE editor_test_objects)
+	add_test(NAME waypoint_groups_tests COMMAND waypoint_groups_tests)
+	set_tests_properties(waypoint_groups_tests PROPERTIES TIMEOUT 30)
+
+	add_executable(data_safety_tests tests/data_safety_tests.cpp)
+	target_link_libraries(data_safety_tests PRIVATE editor_test_objects)
+	add_test(NAME data_safety_tests COMMAND data_safety_tests)
+	set_tests_properties(data_safety_tests PROPERTIES TIMEOUT 60)
+
+	option(ENABLE_MULTIPLAYER_SESSION_TESTS "Build full editor wxSocket session integration tests (no visible windows)" OFF)
+	if(ENABLE_MULTIPLAYER_SESSION_TESTS)
+		add_executable(multiplayer_session_tests tests/multiplayer_session_tests.cpp tests/startup_validation_tests.cpp tests/playtest_integration_tests.cpp tests/collections_palette_tests.cpp tests/resource_session_tab_tests.cpp tests/cross_client_clipboard_tests.cpp)
+		target_link_libraries(multiplayer_session_tests PRIVATE editor_test_objects)
+		add_test(NAME multiplayer_session_tests COMMAND multiplayer_session_tests)
+		set_tests_properties(multiplayer_session_tests PROPERTIES TIMEOUT 90)
+		# Reuse the full editor test harness without running the network suite.
+		add_test(NAME startup_validation_tests COMMAND multiplayer_session_tests --startup-validation)
+		set_tests_properties(startup_validation_tests PROPERTIES TIMEOUT 30)
+		add_test(NAME playtest_integration_tests COMMAND multiplayer_session_tests --playtest-validation)
+		set_tests_properties(playtest_integration_tests PROPERTIES TIMEOUT 60)
+		add_test(NAME renderer_lifecycle_tests COMMAND multiplayer_session_tests --renderer-lifecycle-validation)
+		set_tests_properties(renderer_lifecycle_tests PROPERTIES TIMEOUT 60)
+		add_test(NAME collections_palette_tests COMMAND multiplayer_session_tests --collections-validation)
+		add_test(NAME resource_session_tab_tests COMMAND multiplayer_session_tests --resource-session-tab-validation)
+		add_test(NAME cross_client_clipboard_tests COMMAND multiplayer_session_tests --cross-client-paste-validation)
+		add_test(NAME map_migration_window_tests COMMAND multiplayer_session_tests --migration-window-validation)
+		set_tests_properties(map_migration_window_tests PROPERTIES TIMEOUT 90)
+		set_tests_properties(cross_client_clipboard_tests PROPERTIES TIMEOUT 60)
+		set_tests_properties(resource_session_tab_tests PROPERTIES TIMEOUT 30)
+		set_tests_properties(collections_palette_tests PROPERTIES TIMEOUT 30)
+	endif()
+	add_executable(map_overlay_text_tests tests/map_overlay_text_tests.cpp)
+	target_include_directories(map_overlay_text_tests PRIVATE source)
+	target_link_libraries(map_overlay_text_tests PRIVATE ${wxWidgets_LIBRARIES})
+	target_compile_features(map_overlay_text_tests PRIVATE cxx_std_20)
+	if(MSVC)
+		target_compile_options(map_overlay_text_tests PRIVATE /utf-8)
+	endif()
+	add_test(NAME map_overlay_text_tests COMMAND map_overlay_text_tests)
+
+	option(ENABLE_GL_CACHE_TESTS "Build offscreen OpenGL cache integration tests (requires an OpenGL 3.3 driver)" OFF)
+	if(ENABLE_GL_CACHE_TESTS)
+		add_executable(map_chunk_render_cache_gl_tests tests/map_chunk_render_cache_gl_tests.cpp source/gl_renderer.cpp source/post_process_renderer.cpp source/map_chunk_render_cache.cpp)
+		target_include_directories(map_chunk_render_cache_gl_tests PRIVATE source)
+		target_link_libraries(map_chunk_render_cache_gl_tests PRIVATE ${wxWidgets_LIBRARIES} ${OPENGL_LIBRARIES} ${CMAKE_DL_LIBS} glad::glad fmt::fmt nlohmann_json::nlohmann_json)
+		target_compile_features(map_chunk_render_cache_gl_tests PRIVATE cxx_std_20)
+		if(MSVC)
+			target_compile_options(map_chunk_render_cache_gl_tests PRIVATE /utf-8)
+		endif()
+		add_test(NAME map_chunk_render_cache_gl_tests COMMAND map_chunk_render_cache_gl_tests)
+		set_tests_properties(map_chunk_render_cache_gl_tests PROPERTIES SKIP_RETURN_CODE 77)
+	endif()
+
+	add_executable(map_chunk_geometry_cache_tests tests/map_chunk_geometry_cache_tests.cpp)
+	target_include_directories(map_chunk_geometry_cache_tests PRIVATE source)
+	target_compile_features(map_chunk_geometry_cache_tests PRIVATE cxx_std_20)
+	add_test(NAME map_chunk_geometry_cache_tests COMMAND map_chunk_geometry_cache_tests)
+
+	add_executable(map_chunk_revision_tests tests/map_chunk_revision_tests.cpp)
+	target_include_directories(map_chunk_revision_tests PRIVATE source)
+	target_compile_features(map_chunk_revision_tests PRIVATE cxx_std_20)
+	add_test(NAME map_chunk_revision_tests COMMAND map_chunk_revision_tests)
+
+	add_executable(viewport_metrics_tests tests/viewport_metrics_tests.cpp)
+	target_include_directories(viewport_metrics_tests PRIVATE source)
+	target_compile_features(viewport_metrics_tests PRIVATE cxx_std_20)
+	add_test(NAME viewport_metrics_tests COMMAND viewport_metrics_tests)
+
+	add_executable(favorites_manager_tests tests/favorites_manager_tests.cpp source/favorites_manager.cpp)
+	target_include_directories(favorites_manager_tests PRIVATE source)
+	target_link_libraries(favorites_manager_tests PRIVATE nlohmann_json::nlohmann_json)
+	target_compile_features(favorites_manager_tests PRIVATE cxx_std_20)
+	add_test(NAME favorites_manager_tests COMMAND favorites_manager_tests)
+
+	add_executable(map_diagnostics_tests tests/map_diagnostics_tests.cpp source/map_diagnostics.cpp)
+	target_include_directories(map_diagnostics_tests PRIVATE source)
+	target_compile_features(map_diagnostics_tests PRIVATE cxx_std_20)
+	add_test(NAME map_diagnostics_tests COMMAND map_diagnostics_tests)
+
+	add_executable(multiplayer_protocol_tests tests/multiplayer_protocol_tests.cpp source/multiplayer_protocol.cpp source/multiplayer_crypto.cpp)
+	target_include_directories(multiplayer_protocol_tests PRIVATE source)
+	target_compile_features(multiplayer_protocol_tests PRIVATE cxx_std_20)
+	if(WIN32)
+		target_link_libraries(multiplayer_protocol_tests PRIVATE bcrypt)
+		target_compile_definitions(multiplayer_protocol_tests PRIVATE "_WIN32_WINNT=0x0601")
+		target_compile_options(multiplayer_protocol_tests PRIVATE /utf-8)
+	else()
+		target_link_libraries(multiplayer_protocol_tests PRIVATE OpenSSL::Crypto)
+	endif()
+	add_test(NAME multiplayer_protocol_tests COMMAND multiplayer_protocol_tests)
+endif()
+if(UNIX AND NOT APPLE)
+	set(NEXAMAP_RESOURCE_DESTINATION "${NEXAMAP_DATA_DIR}")
+else()
+	set(NEXAMAP_RESOURCE_DESTINATION .)
+endif()
+install(DIRECTORY
+	"${CMAKE_CURRENT_SOURCE_DIR}/brushes"
+	"${CMAKE_CURRENT_SOURCE_DIR}/data"
+	"${CMAKE_CURRENT_SOURCE_DIR}/extensions"
+	"${CMAKE_CURRENT_SOURCE_DIR}/icons"
+	DESTINATION "${NEXAMAP_RESOURCE_DESTINATION}"
+	PATTERN "user" EXCLUDE
+)
+install(FILES
+	"${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.rtf"
+	"${CMAKE_CURRENT_SOURCE_DIR}/README.md"
+	DESTINATION "${NEXAMAP_RESOURCE_DESTINATION}"
+)
+# Binary packages must carry the notices of the libraries linked into them.
+if(VCPKG_INSTALLED_DIR AND VCPKG_TARGET_TRIPLET)
+	set(NEXAMAP_NOTICES_FILE "${CMAKE_CURRENT_BINARY_DIR}/THIRD_PARTY_NOTICES.txt")
+	add_custom_command(
+		OUTPUT "${NEXAMAP_NOTICES_FILE}"
+		COMMAND "${CMAKE_COMMAND}"
+			"-DINSTALLED_DIR=${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}"
+			"-DOUTPUT=${NEXAMAP_NOTICES_FILE}"
+			"-DEXTRA_NOTICE=${CMAKE_CURRENT_SOURCE_DIR}/data/PNGtoOTBMConverter-LICENSE.txt"
+			-P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateThirdPartyNotices.cmake"
+		DEPENDS
+			"${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateThirdPartyNotices.cmake"
+			"${CMAKE_CURRENT_SOURCE_DIR}/vcpkg.json"
+		COMMENT "Generating THIRD_PARTY_NOTICES.txt from vcpkg copyright files"
+		VERBATIM
+	)
+	add_custom_target(third_party_notices ALL DEPENDS "${NEXAMAP_NOTICES_FILE}")
+	install(FILES "${NEXAMAP_NOTICES_FILE}" DESTINATION "${NEXAMAP_RESOURCE_DESTINATION}")
+else()
+	message(WARNING "No vcpkg install tree: THIRD_PARTY_NOTICES.txt will not be generated or installed")
+endif()
+if(WIN32)
+	install(FILES NexaMap-Debug.cmd DESTINATION .)
+elseif(UNIX AND NOT APPLE)
+	install(PROGRAMS packaging/nexamap-editor DESTINATION ${CMAKE_INSTALL_BINDIR})
+	install(FILES packaging/nexamap-editor.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+	install(FILES brushes/icon/editor_icon.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/32x32/apps RENAME nexamap-editor.png)
+	# Debian policy location. This only points at the files that state the terms.
+	file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/debian-copyright"
+		"NexaMap Editor\n"
+		"Source: https://github.com/Mateuzkl/NexaMap-Editor\n\n"
+		"The terms that apply to this package are in\n"
+		"/usr/share/nexamap/LICENSE.rtf\n\n"
+		"Notices for bundled third-party libraries are in\n"
+		"/usr/share/nexamap/THIRD_PARTY_NOTICES.txt\n"
+	)
+	install(FILES "${CMAKE_CURRENT_BINARY_DIR}/debian-copyright"
+		DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/nexamap-editor RENAME copyright)
+	set(CPACK_GENERATOR "DEB;TGZ")
+	set(CPACK_PACKAGE_NAME "nexamap-editor")
+	file(STRINGS source/version_info.h NEXAMAP_VERSION_LINE REGEX "^#define NEXAMAP_VERSION_STRING")
+	string(REGEX REPLACE ".*\"([^\"]+)\".*" "\\1" CPACK_PACKAGE_VERSION "${NEXAMAP_VERSION_LINE}")
+	set(CPACK_PACKAGE_CONTACT "Mateuzkl <Mateuzkl@users.noreply.github.com>")
+	set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/Mateuzkl/NexaMap-Editor")
+	set(CPACK_STRIP_FILES ON)
+	set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "NexaMap OpenTibia map editor")
+	set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
+	set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+	set(CPACK_DEBIAN_PACKAGE_DEPENDS "libgl1, libegl1, librsvg2-common")
+	set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+	include(CPack)
+endif()
+
+if(BUILD_TESTING)
+	add_executable(runtime_paths_tests tests/runtime_paths_tests.cpp)
+	target_include_directories(runtime_paths_tests PRIVATE source)
+	target_compile_features(runtime_paths_tests PRIVATE cxx_std_20)
+	if(MSVC)
+		target_compile_options(runtime_paths_tests PRIVATE /utf-8)
+	endif()
+	add_test(NAME runtime_paths_tests COMMAND runtime_paths_tests)
+	if(UNIX AND NOT APPLE)
+		find_package(PkgConfig REQUIRED)
+		pkg_check_modules(GTK3 REQUIRED IMPORTED_TARGET gtk+-3.0)
+		add_executable(linux_gui_capture tools/linux_gui_capture.cpp)
+		target_link_libraries(linux_gui_capture PRIVATE PkgConfig::GTK3)
+		add_executable(linux_editor_tests tests/linux_editor_tests.cpp)
+		target_link_libraries(linux_editor_tests PRIVATE editor_test_objects)
+		add_test(NAME linux_editor_tests COMMAND linux_editor_tests)
+		# 77 means xdotool is unavailable, so native input cannot be injected.
+		set_tests_properties(linux_editor_tests PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+	endif()
+
+	add_executable(house_paste_hardening_tests
+		tests/house_paste_hardening_tests.cpp
+		source/session_id.cpp
+	)
+	target_include_directories(house_paste_hardening_tests PRIVATE source)
+	set_target_properties(house_paste_hardening_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/house_paste_hardening_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/house_paste_hardening_tests"
+	)
+	add_test(NAME house_paste_hardening_tests COMMAND house_paste_hardening_tests)
+
+	add_executable(border_learning_tests
+		tests/border_learning_tests.cpp
+		source/border_learning.cpp
+	)
+	target_include_directories(border_learning_tests PRIVATE source)
+	set_target_properties(border_learning_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/border_learning_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/border_learning_tests"
+	)
+	add_test(NAME border_learning_tests COMMAND border_learning_tests)
+
+	add_executable(reference_style_tests
+		tests/reference_style_tests.cpp
+		source/reference_style_store.cpp
+	)
+	target_include_directories(reference_style_tests PRIVATE source)
+	set_target_properties(reference_style_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/reference_style_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/reference_style_tests"
+	)
+	add_test(NAME reference_style_tests COMMAND reference_style_tests)
+
+	add_executable(minimap_import_tests
+		tests/minimap_import_tests.cpp
+		source/minimap_import.cpp
+	)
+	target_include_directories(minimap_import_tests PRIVATE source)
+	target_link_libraries(minimap_import_tests PRIVATE ZLIB::ZLIB)
+	set_target_properties(minimap_import_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/minimap_import_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/minimap_import_tests"
+	)
+	add_test(NAME minimap_import_tests COMMAND minimap_import_tests)
+
+	add_executable(png_map_import_tests
+		tests/png_map_import_tests.cpp
+		source/png_map_import.cpp
+	)
+	target_include_directories(png_map_import_tests PRIVATE source)
+	set_target_properties(png_map_import_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/png_map_import_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/png_map_import_tests"
+	)
+	add_test(NAME png_map_import_tests COMMAND png_map_import_tests)
+
+	add_executable(border_topology_tests
+		tests/border_topology_tests.cpp
+		source/brush_tables.cpp
+	)
+	target_include_directories(border_topology_tests PRIVATE source)
+	target_link_libraries(border_topology_tests PRIVATE ${wxWidgets_LIBRARIES})
+	if(MSVC)
+		target_compile_options(border_topology_tests PRIVATE /utf-8)
+	endif()
+	set_target_properties(border_topology_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/border_topology_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/border_topology_tests"
+	)
+	add_test(NAME border_topology_tests COMMAND border_topology_tests)
+
+	add_executable(sprite_preloader_tests
+		tests/sprite_preloader_tests.cpp
+		source/sprite_preloader.cpp
+	)
+	target_include_directories(sprite_preloader_tests PRIVATE source)
+	target_link_libraries(sprite_preloader_tests PRIVATE Threads::Threads)
+	set_target_properties(sprite_preloader_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/sprite_preloader_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/sprite_preloader_tests"
+	)
+	add_test(NAME sprite_preloader_tests COMMAND sprite_preloader_tests)
+
+	add_executable(client_assets_manifest_tests
+		tests/client_assets_manifest_tests.cpp
+		source/client_assets_manifest.cpp
+	)
+	target_include_directories(client_assets_manifest_tests PRIVATE source)
+	target_link_libraries(client_assets_manifest_tests PRIVATE nlohmann_json::nlohmann_json)
+	set_target_properties(client_assets_manifest_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+	)
+	add_test(NAME client_assets_manifest_tests COMMAND client_assets_manifest_tests)
+
+	add_executable(otml_tests
+		tests/otml_tests.cpp
+	)
+	target_include_directories(otml_tests PRIVATE source)
+	set_target_properties(otml_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+	)
+	add_test(NAME otml_tests COMMAND otml_tests)
+
+	add_executable(server_workspace_tests
+		tests/server_workspace_tests.cpp
+		source/server_workspace.cpp
+	)
+	target_include_directories(server_workspace_tests PRIVATE source)
+	set_target_properties(server_workspace_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+	)
+	add_test(NAME server_workspace_tests COMMAND server_workspace_tests)
+
+	add_executable(editor_data_layout_tests
+		tests/editor_data_layout_tests.cpp
+	)
+	target_compile_definitions(editor_data_layout_tests PRIVATE NEXAMAP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+	set_target_properties(editor_data_layout_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+	)
+	add_test(NAME editor_data_layout_tests COMMAND editor_data_layout_tests)
+
+	add_executable(map_format_tests
+		tests/map_format_tests.cpp
+		source/map_format.cpp
+	)
+	target_include_directories(map_format_tests PRIVATE source)
+	target_link_libraries(map_format_tests PRIVATE ${wxWidgets_LIBRARIES})
+	if(MSVC)
+		target_compile_options(map_format_tests PRIVATE /utf-8)
+	endif()
+	set_target_properties(map_format_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+	)
+	add_test(NAME map_format_tests COMMAND map_format_tests)
+
+	add_executable(item_id_mapping_tests
+		tests/item_id_mapping_tests.cpp
+		source/item_id_mapping.cpp
+	)
+	target_include_directories(item_id_mapping_tests PRIVATE source)
+	set_target_properties(item_id_mapping_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/item_id_mapping_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/item_id_mapping_tests"
+	)
+	add_test(NAME item_id_mapping_tests COMMAND item_id_mapping_tests)
+
+	add_executable(custom_server_converter_tests
+		tests/custom_server_converter_tests.cpp
+		source/filehandle.cpp
+		source/items_xml_id_converter.cpp
+		source/items_otb_id_converter.cpp
+		source/otb_item_id_mapping_provider.cpp
+	)
+	target_include_directories(custom_server_converter_tests PRIVATE source)
+	target_link_libraries(custom_server_converter_tests PRIVATE ${wxWidgets_LIBRARIES} nexamap_pugixml)
+	set_target_properties(custom_server_converter_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+	)
+	if(MSVC)
+		target_compile_options(custom_server_converter_tests PRIVATE /utf-8)
+	endif()
+	add_test(NAME custom_server_converter_tests COMMAND custom_server_converter_tests)
+
+	add_executable(replace_rule_tests
+		tests/replace_rule_tests.cpp
+		source/replace_tool/replace_rule.cpp
+	)
+	target_include_directories(replace_rule_tests PRIVATE source)
+	set_target_properties(replace_rule_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/replace_rule_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/replace_rule_tests"
+	)
+	add_test(NAME replace_rule_tests COMMAND replace_rule_tests)
+
+	add_executable(replace_rule_manager_tests
+		tests/replace_rule_manager_tests.cpp
+		source/replace_tool/replace_rule.cpp
+		source/replace_tool/replace_rule_manager.cpp
+	)
+	target_include_directories(replace_rule_manager_tests PRIVATE source)
+	target_link_libraries(replace_rule_manager_tests PRIVATE nlohmann_json::nlohmann_json)
+	set_target_properties(replace_rule_manager_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/replace_rule_manager_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/replace_rule_manager_tests"
+	)
+	add_test(NAME replace_rule_manager_tests COMMAND replace_rule_manager_tests)
+
+	add_executable(replace_library_catalog_tests
+		tests/replace_library_catalog_tests.cpp
+		source/replace_tool/replace_library_catalog.cpp
+	)
+	target_include_directories(replace_library_catalog_tests PRIVATE source)
+	set_target_properties(replace_library_catalog_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/replace_library_catalog_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/replace_library_catalog_tests"
+	)
+	add_test(NAME replace_library_catalog_tests COMMAND replace_library_catalog_tests)
+
+	add_executable(replace_rule_editor_tests
+		tests/replace_rule_editor_tests.cpp
+		source/replace_tool/replace_rule.cpp
+		source/replace_tool/replace_rule_editor.cpp
+	)
+	target_include_directories(replace_rule_editor_tests PRIVATE source)
+	set_target_properties(replace_rule_editor_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/replace_rule_editor_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/replace_rule_editor_tests"
+	)
+	add_test(NAME replace_rule_editor_tests COMMAND replace_rule_editor_tests)
+
+	add_executable(visual_similarity_index_tests
+		tests/visual_similarity_index_tests.cpp
+		source/replace_tool/visual_similarity_index.cpp
+	)
+	target_include_directories(visual_similarity_index_tests PRIVATE source)
+	target_link_libraries(visual_similarity_index_tests PRIVATE Threads::Threads)
+	set_target_properties(visual_similarity_index_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/visual_similarity_index_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/visual_similarity_index_tests"
+	)
+	add_test(NAME visual_similarity_index_tests COMMAND visual_similarity_index_tests)
+
+	add_executable(replace_execution_plan_tests
+		tests/replace_execution_plan_tests.cpp
+		source/replace_tool/replace_rule.cpp
+		source/replace_tool/replace_execution_plan.cpp
+	)
+	target_include_directories(replace_execution_plan_tests PRIVATE source)
+	set_target_properties(replace_execution_plan_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/replace_execution_plan_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/replace_execution_plan_tests"
+	)
+	add_test(NAME replace_execution_plan_tests COMMAND replace_execution_plan_tests)
+
+	add_executable(depot_conversion_validation_tests
+		tests/depot_conversion_validation_tests.cpp
+		source/depot_conversion_validation.cpp
+	)
+	target_include_directories(depot_conversion_validation_tests PRIVATE source)
+	set_target_properties(depot_conversion_validation_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/depot_conversion_validation_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/depot_conversion_validation_tests"
+	)
+	add_test(NAME depot_conversion_validation_tests COMMAND depot_conversion_validation_tests)
+
+	add_executable(spawn_format_tests
+		tests/spawn_format_tests.cpp
+		source/spawn_format.cpp
+	)
+	target_include_directories(spawn_format_tests PRIVATE source)
+	target_link_libraries(spawn_format_tests PRIVATE nexamap_pugixml)
+	set_target_properties(spawn_format_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/spawn_format_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/spawn_format_tests"
+	)
+	add_test(NAME spawn_format_tests COMMAND spawn_format_tests)
+
+	add_executable(filehandle_tests
+		tests/filehandle_tests.cpp
+		source/filehandle.cpp
+	)
+	target_include_directories(filehandle_tests PRIVATE source)
+	target_link_libraries(filehandle_tests PRIVATE ${wxWidgets_LIBRARIES} fmt::fmt)
+	set_target_properties(filehandle_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/filehandle_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/filehandle_tests"
+	)
+	add_test(NAME filehandle_tests COMMAND filehandle_tests)
+
+	add_executable(xml_attribute_tests tests/xml_attribute_tests.cpp)
+	target_include_directories(xml_attribute_tests PRIVATE source)
+	target_link_libraries(xml_attribute_tests PRIVATE nexamap_pugixml)
+	set_target_properties(xml_attribute_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+	)
+	add_test(NAME xml_attribute_tests COMMAND xml_attribute_tests)
+
+	add_executable(creature_cache_tests
+		tests/creature_cache_tests.cpp
+		source/creature_cache.cpp
+	)
+	target_include_directories(creature_cache_tests PRIVATE source)
+	target_link_libraries(creature_cache_tests PRIVATE ${wxWidgets_LIBRARIES} fmt::fmt nlohmann_json::nlohmann_json nexamap_pugixml)
+	set_target_properties(creature_cache_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/creature_cache_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/creature_cache_tests"
+	)
+	add_test(NAME creature_cache_tests COMMAND creature_cache_tests)
+
+	add_executable(spawn_persistence_tests
+		tests/spawn_persistence_tests.cpp
+		source/spawn_format.cpp
+		source/spawn_source_remap_core.cpp
+	)
+	target_include_directories(spawn_persistence_tests PRIVATE source)
+	target_link_libraries(spawn_persistence_tests PRIVATE ${wxWidgets_LIBRARIES} fmt::fmt nlohmann_json::nlohmann_json nexamap_pugixml)
+	set_target_properties(spawn_persistence_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/spawn_persistence_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/spawn_persistence_tests"
+	)
+	add_test(NAME spawn_persistence_tests COMMAND spawn_persistence_tests)
+
+	add_executable(spawn_xml_converter_tests
+		tests/spawn_xml_converter_tests.cpp
+		source/spawn_xml_converter.cpp
+	)
+	target_include_directories(spawn_xml_converter_tests PRIVATE source)
+	target_link_libraries(spawn_xml_converter_tests PRIVATE nexamap_pugixml)
+	set_target_properties(spawn_xml_converter_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/spawn_xml_converter_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/spawn_xml_converter_tests"
+	)
+	add_test(NAME spawn_xml_converter_tests COMMAND spawn_xml_converter_tests)
+
+	add_executable(procedural_map_generator_tests
+		tests/procedural_map_generator_tests.cpp
+		source/procedural_map_generator.cpp
+	)
+	target_include_directories(procedural_map_generator_tests PRIVATE source)
+	set_target_properties(procedural_map_generator_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/procedural_map_generator_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/procedural_map_generator_tests"
+	)
+	add_test(NAME procedural_map_generator_tests COMMAND procedural_map_generator_tests)
+
+	add_executable(zones_tests
+		tests/zones_tests.cpp
+		source/zones.cpp
+	)
+	target_include_directories(zones_tests PRIVATE source)
+	target_link_libraries(zones_tests PRIVATE ${wxWidgets_LIBRARIES})
+	if(MSVC)
+		target_compile_options(zones_tests PRIVATE /utf-8)
+	endif()
+	set_target_properties(zones_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/zones_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/zones_tests"
+	)
+	add_test(NAME zones_tests COMMAND zones_tests)
+
+	add_executable(unreachable_cleaner_tests
+		tests/unreachable_cleaner_tests.cpp
+	)
+	target_include_directories(unreachable_cleaner_tests PRIVATE source)
+	if(MSVC)
+		target_compile_options(unreachable_cleaner_tests PRIVATE /utf-8)
+	endif()
+	set_target_properties(unreachable_cleaner_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/unreachable_cleaner_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/unreachable_cleaner_tests"
+	)
+	add_test(NAME unreachable_cleaner_tests COMMAND unreachable_cleaner_tests)
+
+	add_executable(palette_toolbar_tests
+		tests/palette_toolbar_tests.cpp
+	)
+	target_include_directories(palette_toolbar_tests PRIVATE source)
+	if(MSVC)
+		target_compile_options(palette_toolbar_tests PRIVATE /utf-8)
+	endif()
+	set_target_properties(palette_toolbar_tests PROPERTIES
+		CXX_STANDARD 20
+		CXX_STANDARD_REQUIRED ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/palette_toolbar_tests"
+		RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/palette_toolbar_tests"
+	)
+	add_test(NAME palette_toolbar_tests COMMAND palette_toolbar_tests)
+
+	# Release tests must execute their assertions, including calls inside assert().
+	# __DEBUG__ also enables the editor's ASSERT() macro in these targets.
+	get_property(build_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+	foreach(test_target IN LISTS build_targets)
+		if(test_target MATCHES "_tests$" OR test_target STREQUAL "editor_test_objects")
+			target_compile_definitions(${test_target} PRIVATE __DEBUG__)
+			if(MSVC)
+				target_compile_options(${test_target} PRIVATE /UNDEBUG)
+			else()
+				target_compile_options(${test_target} PRIVATE -UNDEBUG)
+			endif()
+		endif()
+	endforeach()
+endif()
+
+# Applies to everything built from this directory. The generated protobuf code
+# lives in a subdirectory and takes hardening only, see source/protobuf.
+target_link_libraries(${PROJECT_NAME} nexamap_warnings nexamap_hardening)
+get_property(build_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(project_target IN LISTS build_targets)
+	get_target_property(project_target_type ${project_target} TYPE)
+	if(project_target_type MATCHES "^(EXECUTABLE|STATIC_LIBRARY|OBJECT_LIBRARY)$" AND NOT project_target STREQUAL PROJECT_NAME)
+		target_link_libraries(${project_target} PRIVATE nexamap_warnings nexamap_hardening)
+	endif()
+endforeach()
