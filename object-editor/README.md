@@ -15,6 +15,10 @@ python object-editor/main.py
 ```
 
 Também pode abrir `Backlands-Asset-Studio.cmd` com duplo clique, depois de instalar a dependência.
+Sem argumentos, o editor reabre o último projeto usado. Na primeira execução,
+procura os assets do jogo em `assets/860/Tibia.otfi`, na raiz do repositório.
+Uma pasta ou um OTFI passado na linha de comando tem prioridade. A preferência
+fica em `%LOCALAPPDATA%/Backlands/AssetStudio/settings.json` no Windows.
 Para abrir um projeto ou validar arquivos sem interface:
 
 ```powershell

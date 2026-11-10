@@ -4,6 +4,9 @@
 #   (ver docs/00-setup-e-artefatos.md).
 /_study/
 
+# Assets locais do cliente, obtidos separadamente.
+/assets/860/
+
 # Builds e binários
 build/
 out/

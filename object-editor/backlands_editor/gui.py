@@ -13,6 +13,7 @@ from PIL import Image, ImageTk
 
 from .formats import Attribute, FLAG_SPECS, FormatOptions, FrameGroup
 from .project import Project
+from .settings import remember_project, startup_project
 from .widgets import PixelEditor, checker
 
 CATEGORIES = ("Itens", "Criaturas", "Efeitos", "Projéteis")
@@ -347,8 +348,14 @@ class Editor:
         self.refresh_library()
         self.select_sprite(0)
         self.update_title()
+        self.remember_current_project()
         opts = project.options
         self.status.set(f"8.60 · 16×16 · {'RGBA' if opts.transparency else 'RGB'} · IDs {'32' if opts.extended else '16'} bits · {len(project.spr)} sprites")
+
+    def remember_current_project(self):
+        if self.project.directory:
+            metadata = self.project.directory / self.project.otfi_name
+            remember_project(metadata if metadata.is_file() else self.project.directory)
 
     def new(self):
         if not self.confirm_discard():
@@ -378,6 +385,7 @@ class Editor:
                 return
             options = dialog.options
         self.root.configure(cursor="watch")
+        self.status.set(f"Carregando assets de {path}…")
         self.root.update_idletasks()
         try:
             project = Project.load(path, options=options)
@@ -398,6 +406,7 @@ class Editor:
         finally:
             self.root.configure(cursor="")
         self.dirty = False
+        self.remember_current_project()
         self.update_title()
         self.status.set(f"Salvo em {directory} · originais preservados em .backups quando substituídos")
         return True
@@ -411,6 +420,7 @@ class Editor:
             return False
         self.project.save(Path(path))
         self.dirty = False
+        self.remember_current_project()
         self.update_title()
         self.status.set(f"DAT + SPR + OTFI salvos em {path}")
         return True
@@ -883,5 +893,5 @@ class Editor:
 
 def main(path: Path | None = None):
     root = tk.Tk()
-    Editor(root, path)
+    Editor(root, startup_project(path))
     root.mainloop()
