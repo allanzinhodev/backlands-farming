@@ -1,0 +1,32 @@
+# Clones de estudo (upstream). Nada aqui sobe para o repositório.
+# - AstraClient: somente estudo, nunca versionar.
+# - forgottenserver / NexaMap: entram no repo via `git subtree` quando forem modificados
+#   (ver docs/00-setup-e-artefatos.md).
+/_study/
+
+# Builds e binários
+build/
+out/
+dist/
+*.exe
+*.dll
+*.pdb
+*.obj
+*.lib
+
+# Configuração local / segredos
+config.lua
+.env
+*.pem
+!**/*.example.pem
+
+# Dados de runtime do servidor
+**/data/logs/*
+**/data/cache/
+
+# IDE / SO
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
