@@ -1,0 +1,21 @@
+local spell = Spell("instant")
+function spell.onCastSpell(creature, variant)
+	return creature:conjureItem(0, 3450, 10, CONST_ME_MAGIC_BLUE)
+end
+
+
+spell:group("support")
+spell:id(163)
+spell:name("Conjure Power Bolt")
+spell:words("exevo con vis")
+spell:level(59)
+spell:mana(700)
+spell:soul(4)
+spell:isPremium(true)
+spell:isSelfTarget(true)
+spell:cooldown(2 * 1000)
+spell:groupCooldown(2 * 1000)
+spell:needLearn(false)
+spell:isAggressive(false)
+spell:vocation("royal paladin")
+spell:register()

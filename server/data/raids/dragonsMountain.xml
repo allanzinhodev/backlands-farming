@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<raid>
+	<!-- Message broadcast -->
+	<announce delay="1000" type="warning" message="Dragons are attacking in Dragons Mountain!" />
+
+	<!-- Floor (z = 7) -->
+	<areaspawn delay="2000" radius="18" centerx="1146" centery="1112" centerz="7">
+		<monster name="Dragon Lord" amount="10" />
+		<monster name="Dragon Lord Hatchling" amount="10" />
+	</areaspawn>
+
+	<!-- Floor (z = 6) -->
+	<areaspawn delay="2000" radius="29" centerx="1144" centery="1116" centerz="6">
+		<monster name="Dragon" amount="20" />
+		<monster name="Dragon Hatchling" amount="20" />
+	</areaspawn>
+
+	<!-- Floor (z = 5) -->
+	<areaspawn delay="2000" radius="22" centerx="1145" centery="1116" centerz="5">
+		<monster name="Dragon" amount="20" />
+		<monster name="Dragon Hatchling" amount="20" />
+	</areaspawn>
+
+	<!-- Floor (z = 4) -->
+	<areaspawn delay="2000" radius="16" centerx="1146" centery="1116" centerz="4">
+		<monster name="Dragon Lord" amount="15" />
+		<monster name="Dragon Lord Hatchling" amount="15" />
+	</areaspawn>
+
+	<!-- Floor (z = 3) -->
+	<areaspawn delay="2000" radius="10" centerx="1146" centery="1117" centerz="3">
+		<monster name="Dragon Lord" amount="5" />
+		<monster name="Dragon Lord Hatchling" amount="5" />
+	</areaspawn>
+</raid>

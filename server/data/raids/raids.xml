@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<raids>
+		<!-- <raid name="testraid" file="testraid.xml" interval2="30" margin="0" spawnFile="testraidSpawn.xml" /> -->
+		<raid name="dragon" file="dragonsMountain.xml" interval2="30" margin="0" spawnFile="dragonsMountainSpawn.xml" />
+		
+</raids>

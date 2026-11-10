@@ -1,0 +1,5653 @@
+// Copyright 2023 The Forgotten Server Authors. All rights reserved.
+// Use of this source code is governed by the GPL-2.0 License that can be found in the LICENSE file.
+
+#include "otpch.h"
+
+#include "luascript.h"
+
+#include "bed.h"
+#include "chat.h"
+#include "configmanager.h"
+#include "databasemanager.h"
+#include "databasetasks.h"
+#include "depotchest.h"
+#include "events.h"
+#include "game.h"
+#include "housetile.h"
+#include "kv/kv.h"
+#include "luavariant.h"
+#include "matrixarea.h"
+#include "monster.h"
+#include "npc.h"
+#include "player.h"
+#include "protocolstatus.h"
+#include "scheduler.h"
+#include "script.h"
+#include "scriptmanager.h"
+#include "spectators.h"
+#include "spells.h"
+#include "stress_test.h"
+#include "teleport.h"
+#include "logger.h"
+#include "tasks.h"
+#include <fmt/format.h>
+#include "globalevent.h"
+
+// getItemUserdata template — definition here to avoid circular item.h ↔ luascript.h include
+namespace Lua {
+template <class T>
+T* getItemUserdata(lua_State* L, int32_t arg)
+{
+	auto& ptr = getSharedPtr<Item>(L, arg);
+	if (!ptr) {
+		return nullptr;
+	}
+	using BaseT = std::remove_const_t<T>;
+	if constexpr (std::is_same_v<BaseT, Item>) {
+		return ptr.get();
+	} else if constexpr (std::is_same_v<BaseT, Container>) {
+		return ptr->getContainer();
+	} else if constexpr (std::is_same_v<BaseT, Teleport>) {
+		return ptr->getTeleport();
+	} else {
+		return static_cast<T*>(ptr.get());
+	}
+}
+template Item* getItemUserdata<Item>(lua_State*, int32_t);
+template const Item* getItemUserdata<const Item>(lua_State*, int32_t);
+template Container* getItemUserdata<Container>(lua_State*, int32_t);
+template const Container* getItemUserdata<const Container>(lua_State*, int32_t);
+} // namespace Lua
+
+extern Game g_game;
+extern Vocations g_vocations;
+extern LuaEnvironment g_luaEnvironment;
+
+namespace {
+constexpr int32_t KV_MAX_LUA_RECURSION = 32;
+
+static int pushAsyncTransactionError(lua_State* L, std::string_view syncApiName)
+{
+	lua_pushnil(L);
+	lua_pushfstring(L, "Cannot use async queries inside a database transaction. Use synchronous %s instead.", std::string(syncApiName).c_str());
+	return 2;
+}
+
+static void finishAsyncDatabaseCallback(lua_State* luaState, int32_t ref, uint32_t scriptId, int32_t nargs)
+{
+	auto env = LuaScriptInterface::getScriptEnv();
+	env->setScriptId(scriptId, &g_luaEnvironment);
+	g_luaEnvironment.callFunction(nargs);
+	luaL_unref(luaState, LUA_REGISTRYINDEX, ref);
+}
+
+static Player* getRequiredPlayerOrPushFalse(lua_State* L, int32_t index)
+{
+	Player* player = Lua::getPlayer(L, index);
+	if (!player) {
+		reportErrorFunc(L, LuaScriptInterface::getErrorDesc(LuaErrorCode::PLAYER_NOT_FOUND));
+		Lua::pushBoolean(L, false);
+		return nullptr;
+	}
+	return player;
+}
+
+int luaSetMonsterLevelSkullRange(lua_State* L)
+{
+	// setMonsterLevelSkullRange(skullType, minLevel, maxLevel)
+	Skulls_t skull = Lua::getInteger<Skulls_t>(L, 1);
+	int32_t minLevel = Lua::getInteger<int32_t>(L, 2);
+	int32_t maxLevel = Lua::getInteger<int32_t>(L, 3);
+	if (minLevel > maxLevel) {
+		reportErrorFunc(L, "setMonsterLevelSkullRange: minLevel cannot be greater than maxLevel");
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	if (!monster_level::setSkullRange(skull, minLevel, maxLevel)) {
+		reportErrorFunc(L, "setMonsterLevelSkullRange: invalid skull type");
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	Lua::pushBoolean(L, true);
+	return 1;
+}
+int luaSetMonsterLevelBonus(lua_State* L)
+{
+	// setMonsterLevelBonus(bonusType, value)
+	std::string type = Lua::getString(L, 1);
+	float value = Lua::getNumber<float>(L, 2);
+	if (!monster_level::setBonus(type, value)) {
+		reportErrorFunc(L, "setMonsterLevelBonus: invalid bonus type or value");
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	Lua::pushBoolean(L, true);
+	return 1;
+}
+
+std::shared_ptr<KV>* getKVUserdata(lua_State* L, const char* methodName)
+{
+	auto* ptr = static_cast<std::shared_ptr<KV>*>(luaL_testudata(L, 1, "KV"));
+	if (ptr) {
+		if (!*ptr) {
+			luaL_error(L, "%s called on released KV userdata", methodName);
+		}
+		return ptr;
+	}
+
+	if (Lua::isUserdata(L, 1)) {
+		luaL_error(L, "%s called on non-KV userdata", methodName);
+	}
+	return nullptr;
+}
+
+std::optional<ValueWrapper> getKVValueFromLua(lua_State* L, int32_t index, int32_t depth = 0)
+{
+	if (depth > KV_MAX_LUA_RECURSION) {
+		return std::nullopt;
+	}
+
+	index = lua_absindex(L, index);
+	if (Lua::isBoolean(L, index)) {
+		return ValueWrapper(Lua::getBoolean(L, index));
+	}
+	if (Lua::isNumber(L, index)) {
+		const double number = Lua::getNumber<double>(L, index);
+		const auto integer = static_cast<int64_t>(number);
+		if (number == static_cast<double>(integer) && integer >= INT32_MIN && integer <= INT32_MAX) {
+			return ValueWrapper(static_cast<int32_t>(integer));
+		}
+		return ValueWrapper(number);
+	}
+	if (Lua::isString(L, index)) {
+		return ValueWrapper(Lua::getString(L, index));
+	}
+	if (!Lua::isTable(L, index)) {
+		return std::nullopt;
+	}
+
+	const auto arrayLength = lua_rawlen(L, index);
+	if (arrayLength > 0) {
+		ArrayType array;
+		array.reserve(static_cast<size_t>(arrayLength));
+		for (lua_Unsigned i = 1; i <= arrayLength; ++i) {
+			lua_rawgeti(L, index, static_cast<lua_Integer>(i));
+			auto value = getKVValueFromLua(L, -1, depth + 1);
+			if (!value) {
+				lua_pop(L, 1);
+				return std::nullopt;
+			}
+			array.emplace_back(std::move(*value));
+			lua_pop(L, 1);
+		}
+		return ValueWrapper(array);
+	}
+
+	MapType map;
+	lua_pushnil(L);
+	while (lua_next(L, index) != 0) {
+		if (lua_type(L, -2) != LUA_TSTRING) {
+			lua_pop(L, 2);
+			return std::nullopt;
+		}
+
+		const auto key = Lua::getString(L, -2);
+		auto value = getKVValueFromLua(L, -1, depth + 1);
+		if (!value) {
+			lua_pop(L, 2);
+			return std::nullopt;
+		}
+
+		map[key] = std::make_shared<ValueWrapper>(std::move(*value));
+		lua_pop(L, 1);
+	}
+	return ValueWrapper(map);
+}
+
+void pushKVValue(lua_State* L, const ValueWrapper& value, int32_t depth = 0)
+{
+	if (depth > KV_MAX_LUA_RECURSION) {
+		lua_pushnil(L);
+		return;
+	}
+
+	std::visit([L, depth](const auto& arg) {
+		using T = std::decay_t<decltype(arg)>;
+		if constexpr (std::is_same_v<T, StringType>) {
+			Lua::pushString(L, arg);
+		} else if constexpr (std::is_same_v<T, BooleanType>) {
+			Lua::pushBoolean(L, arg);
+		} else if constexpr (std::is_same_v<T, IntType>) {
+			lua_pushinteger(L, arg);
+		} else if constexpr (std::is_same_v<T, DoubleType>) {
+			lua_pushnumber(L, arg);
+		} else if constexpr (std::is_same_v<T, ArrayType>) {
+			lua_createtable(L, static_cast<int>(arg.size()), 0);
+			for (size_t i = 0; i < arg.size(); ++i) {
+				pushKVValue(L, arg[i], depth + 1);
+				lua_rawseti(L, -2, static_cast<lua_Integer>(i + 1));
+			}
+		} else if constexpr (std::is_same_v<T, MapType>) {
+			lua_createtable(L, 0, static_cast<int>(arg.size()));
+			for (const auto& [key, child] : arg) {
+				if (child) {
+					pushKVValue(L, *child, depth + 1);
+				} else {
+					lua_pushnil(L);
+				}
+				lua_setfield(L, -2, key.c_str());
+			}
+		}
+	}, value.getVariant());
+}
+} // namespace
+
+
+std::multimap<ScriptEnvironment*, std::shared_ptr<Item>> ScriptEnvironment::tempItems;
+
+LuaEnvironment g_luaEnvironment;
+
+ScriptEnvironment::ScriptEnvironment() { resetEnv(); }
+
+ScriptEnvironment::~ScriptEnvironment() { resetEnv(); }
+
+void ScriptEnvironment::setScriptId(int32_t newScriptId, LuaScriptInterface* scriptInterface)
+{
+	scriptId = newScriptId;
+	interface = scriptInterface;
+
+	if (!scriptInterface) {
+		clearLuaCrashContext();
+		return;
+	}
+
+	const std::string_view origin = timerEvent && !timerEventOrigin.empty() ? std::string_view(timerEventOrigin)
+	                                                                        : scriptInterface->getFileById(newScriptId);
+	setLuaCrashContext(scriptInterface->getInterfaceName(), origin, newScriptId);
+}
+
+void ScriptEnvironment::resetEnv()
+{
+	scriptId = 0;
+	callbackId = 0;
+	timerEvent = false;
+	timerEventOrigin.clear();
+	hasOpenTransaction = false;
+	interface = nullptr;
+	curNpc = nullptr;
+	localMap.clear();
+	localCreatureRefs.clear();
+	tempResults.clear();
+
+	std::erase_if(tempItems, [this](auto& entry) {
+		if (entry.first != this) {
+			return false;
+		}
+
+		auto& itemSp = entry.second;
+		if (itemSp && itemSp->getParent() == VirtualCylinder::virtualCylinder) {
+			g_game.ReleaseItem(std::move(itemSp));
+		}
+		return true;
+	});
+}
+
+void ScriptEnvironment::clearTempItems()
+{
+	for (auto& [_, itemSp] : tempItems) {
+		if (itemSp && itemSp->getParent() == VirtualCylinder::virtualCylinder) {
+			g_game.ReleaseItem(std::move(itemSp));
+		}
+	}
+	tempItems.clear();
+}
+
+void ScriptEnvironment::setNpc(Npc* npc)
+{
+	curNpc = npc;
+}
+
+bool ScriptEnvironment::setCallbackId(int32_t callbackId, LuaScriptInterface* scriptInterface)
+{
+	if (this->callbackId != 0) {
+		// nested callbacks are not allowed
+		if (interface) {
+			reportErrorFunc(interface->getLuaState(), "Nested callbacks!");
+		}
+		return false;
+	}
+
+	this->callbackId = callbackId;
+	interface = scriptInterface;
+	if (scriptInterface) {
+		setLuaCrashContext(scriptInterface->getInterfaceName(), scriptInterface->getFileById(callbackId), callbackId);
+		setLuaCrashPhase("registered Lua callback");
+	} else {
+		clearLuaCrashContext();
+	}
+	return true;
+}
+
+void ScriptEnvironment::getEventInfo(int32_t& scriptId, LuaScriptInterface*& scriptInterface, int32_t& callbackId,
+                                     bool& timerEvent) const
+{
+	scriptId = this->scriptId;
+	scriptInterface = interface;
+	callbackId = this->callbackId;
+	timerEvent = this->timerEvent;
+}
+
+uint32_t ScriptEnvironment::addThing(Thing* thing)
+{
+	if (!thing || thing->isRemoved()) {
+		return 0;
+	}
+
+	Creature* creature = thing->getCreature();
+	if (creature) {
+		return creature->getID();
+	}
+
+	Item* item = thing->getItem();
+	if (item && item->hasAttribute(ITEM_ATTRIBUTE_UNIQUEID)) {
+		return item->getUniqueId();
+	}
+
+	for (const auto& it : localMap) {
+		if (it.second == item) {
+			return it.first;
+		}
+	}
+
+	localMap[++lastUID] = item;
+	return lastUID;
+}
+
+void ScriptEnvironment::insertItem(uint32_t uid, Item* item)
+{
+	auto result = localMap.emplace(uid, item);
+	if (!result.second) {
+		LOG_ERROR("Lua Script Error: Thing uid already taken.");
+	}
+}
+
+Thing* ScriptEnvironment::getThingByUID(uint32_t uid)
+{
+	if (uid >= 0x10000000) {
+		return getCreatureByUID(uid);
+	}
+
+	if (uid <= std::numeric_limits<uint16_t>::max()) {
+		Item* item = g_game.getUniqueItem(static_cast<uint16_t>(uid));
+		if (item && !item->isRemoved()) {
+			return item;
+		}
+		return nullptr;
+	}
+
+	auto it = localMap.find(uid);
+	if (it != localMap.end()) {
+		Item* item = it->second;
+		if (!item->isRemoved()) {
+			return item;
+		}
+	}
+	return nullptr;
+}
+
+Creature* ScriptEnvironment::getCreatureByUID(uint32_t uid)
+{
+	auto creatureRef = g_game.getCreatureByIDShared(uid);
+	Creature* creature = creatureRef.get();
+	if (!creature) {
+		return nullptr;
+	}
+
+	auto it = std::find_if(localCreatureRefs.begin(), localCreatureRefs.end(), [creature](const auto& ref) {
+		return ref.get() == creature;
+	});
+	if (it == localCreatureRefs.end()) {
+		localCreatureRefs.push_back(std::move(creatureRef));
+	}
+	return creature;
+}
+
+Item* ScriptEnvironment::getItemByUID(uint32_t uid)
+{
+	Thing* thing = getThingByUID(uid);
+	if (!thing) {
+		return nullptr;
+	}
+	return thing->getItem();
+}
+
+Container* ScriptEnvironment::getContainerByUID(uint32_t uid)
+{
+	Item* item = getItemByUID(uid);
+	if (!item) {
+		return nullptr;
+	}
+	return item->getContainer();
+}
+
+void ScriptEnvironment::removeItemByUID(uint32_t uid)
+{
+	if (uid <= std::numeric_limits<uint16_t>::max()) {
+		g_game.removeUniqueItem(static_cast<uint16_t>(uid));
+		return;
+	}
+
+	auto it = localMap.find(uid);
+	if (it != localMap.end()) {
+		localMap.erase(it);
+	}
+}
+
+void ScriptEnvironment::addTempItem(const std::shared_ptr<Item>& item) { tempItems.emplace(this, item); }
+
+void ScriptEnvironment::removeTempItem(Item* item)
+{
+	auto it = std::find_if(tempItems.begin(), tempItems.end(), [item](const auto& entry) {
+		return entry.second.get() == item;
+	});
+	if (it != tempItems.end()) {
+		tempItems.erase(it);
+	}
+}
+
+uint32_t ScriptEnvironment::addResult(DBResult_ptr res)
+{
+	tempResults[++lastResultId] = res;
+	return lastResultId;
+}
+
+bool ScriptEnvironment::removeResult(uint32_t id)
+{
+	auto it = tempResults.find(id);
+	if (it == tempResults.end()) {
+		return false;
+	}
+
+	tempResults.erase(it);
+	return true;
+}
+
+DBResult_ptr ScriptEnvironment::getResultByID(uint32_t id)
+{
+	auto it = tempResults.find(id);
+	if (it == tempResults.end()) {
+		return nullptr;
+	}
+	return it->second;
+}
+
+std::string_view LuaScriptInterface::getErrorDesc(LuaErrorCode code)
+{
+	switch (code) {
+		case LuaErrorCode::PLAYER_NOT_FOUND:
+			return "Player not found";
+		case LuaErrorCode::CREATURE_NOT_FOUND:
+			return "Creature not found";
+		case LuaErrorCode::ITEM_NOT_FOUND:
+			return "Item not found";
+		case LuaErrorCode::THING_NOT_FOUND:
+			return "Thing not found";
+		case LuaErrorCode::TILE_NOT_FOUND:
+			return "Tile not found";
+		case LuaErrorCode::HOUSE_NOT_FOUND:
+			return "House not found";
+		case LuaErrorCode::COMBAT_NOT_FOUND:
+			return "Combat not found";
+		case LuaErrorCode::CONDITION_NOT_FOUND:
+			return "Condition not found";
+		case LuaErrorCode::AREA_NOT_FOUND:
+			return "Area not found";
+		case LuaErrorCode::CONTAINER_NOT_FOUND:
+			return "Container not found";
+		case LuaErrorCode::VARIANT_NOT_FOUND:
+			return "Variant not found";
+		case LuaErrorCode::VARIANT_UNKNOWN:
+			return "Unknown variant type";
+		case LuaErrorCode::SPELL_NOT_FOUND:
+			return "Spell not found";
+		case LuaErrorCode::CALLBACK_NOT_FOUND:
+			return "Callback not found";
+		default:
+			return "Bad error code";
+	}
+}
+
+ScriptEnvironment LuaScriptInterface::scriptEnv[LuaScriptInterface::SCRIPT_ENV_COUNT];
+int32_t LuaScriptInterface::scriptEnvIndex = -1;
+
+void LuaScriptInterface::reportScriptEnvOutOfBounds(const char* function, int32_t index)
+{
+	LOG_ERROR("[{}] scriptEnvIndex out of bounds: {} (valid range 0..{})", function, index,
+	          SCRIPT_ENV_COUNT - 1);
+}
+
+LuaScriptInterface::LuaScriptInterface(std::string_view interfaceName) : interfaceName{interfaceName} {}
+
+LuaScriptInterface::~LuaScriptInterface()
+{
+	closeState();
+	cacheFiles.clear();
+}
+
+void LuaScriptInterface::resetScriptEnv()
+{
+	assert(scriptEnvIndex >= 0 && scriptEnvIndex < SCRIPT_ENV_COUNT);
+	// The upper bound was previously unchecked, so a stale index would index past
+	// the end of the array and write there. Bail out instead of corrupting memory.
+	if (scriptEnvIndex < 0 || scriptEnvIndex >= SCRIPT_ENV_COUNT) {
+		reportScriptEnvOutOfBounds(__func__, scriptEnvIndex);
+		return;
+	}
+
+	// Rollback any open transaction leaked by the script that just ended
+	if (Database::getInstance().isInTransaction()) {
+		Database::getInstance().rollback();
+		scriptEnv[scriptEnvIndex].hasOpenTransaction = false;
+	}
+	scriptEnv[scriptEnvIndex--].resetEnv();
+
+	if (!hasScriptEnv()) {
+		clearLuaCrashContext();
+		return;
+	}
+
+	ScriptEnvironment* outerEnv = getScriptEnv();
+	LuaScriptInterface* outerInterface = outerEnv->getScriptInterface();
+	if (!outerInterface) {
+		clearLuaCrashContext();
+		return;
+	}
+
+	const int32_t activeScriptId =
+	    outerEnv->getCallbackId() != 0 ? outerEnv->getCallbackId() : outerEnv->getScriptId();
+	const std::string_view origin = outerEnv->getTimerEventOrigin().empty()
+	                                    ? outerInterface->getFileById(activeScriptId)
+	                                    : std::string_view(outerEnv->getTimerEventOrigin());
+	setLuaCrashContext(outerInterface->getInterfaceName(), origin, activeScriptId);
+	setLuaCrashPhase("resumed outer Lua callback");
+}
+
+bool LuaScriptInterface::reInitState()
+{
+	g_luaEnvironment.clearCombatObjects(this);
+	g_luaEnvironment.clearAreaObjects(this);
+
+	closeState();
+
+	cacheFiles.clear();
+	runningEventId = EVENT_ID_USER;
+
+	return initState();
+}
+
+void LuaEnvironment::shutdown()
+{
+    if (g_luaEnvironment.luaState) {
+		lua_gc(g_luaEnvironment.luaState, LUA_GCCOLLECT, 0);
+		lua_gc(g_luaEnvironment.luaState, LUA_GCCOLLECT, 0);
+    }
+
+	// Close the main Lua state
+    g_luaEnvironment.closeState();
+}
+
+/// Same as lua_pcall, but adds stack trace to error strings in called function.
+int LuaScriptInterface::protectedCall(lua_State* L, int nargs, int nresults)
+{
+	setLuaCrashPhase("LuaScriptInterface::protectedCall / install error handler");
+	int error_index = lua_gettop(L) - nargs;
+	lua_pushcfunction(L, luaErrorHandler);
+	lua_insert(L, error_index);
+
+	setLuaCrashPhase("LuaScriptInterface::protectedCall / executing lua_pcall");
+	int ret = lua_pcall(L, nargs, nresults, error_index);
+	setLuaCrashPhase("LuaScriptInterface::protectedCall / remove error handler");
+	lua_remove(L, error_index);
+	return ret;
+}
+
+int32_t LuaScriptInterface::loadFile(std::string_view file, Npc* npc /* = nullptr*/)
+{
+	return loadFile(file, Npcs::makeScriptHandle(npc));
+}
+
+int32_t LuaScriptInterface::loadFile(std::string_view file, const std::shared_ptr<Npc>& npc)
+{
+	// loads file as a chunk at stack top
+	int ret = luaL_loadfile(luaState, file.data());
+	if (ret != 0) {
+		lastLuaError = Lua::popString(luaState);
+		return -1;
+	}
+
+	// check that it is loaded as a function
+	if (!Lua::isFunction(luaState, -1)) {
+		lua_pop(luaState, 1);
+		return -1;
+	}
+
+	loadingFile = file;
+
+	if (!reserveScriptEnv()) {
+		lua_pop(luaState, 1);
+		return -1;
+	}
+
+	ScriptEnvironment* env = getScriptEnv();
+	env->setScriptId(EVENT_ID_LOADING, this);
+	env->setNpc(npc);
+
+	// execute it
+	ret = protectedCall(luaState, 0, 0);
+	if (ret != 0) {
+		reportError(nullptr, Lua::popString(luaState));
+		resetScriptEnv();
+		return -1;
+	}
+
+	resetScriptEnv();
+	return 0;
+}
+
+int32_t LuaScriptInterface::getEvent(std::string_view eventName)
+{
+	// get our events table
+	lua_rawgeti(luaState, LUA_REGISTRYINDEX, eventTableRef);
+	if (!Lua::isTable(luaState, -1)) {
+		lua_pop(luaState, 1);
+		return -1;
+	}
+
+	// get current event function pointer
+	lua_getglobal(luaState, eventName.data());
+	if (!Lua::isFunction(luaState, -1)) {
+		lua_pop(luaState, 2);
+		return -1;
+	}
+
+	// save in our events table
+	lua_pushvalue(luaState, -1);
+	lua_rawseti(luaState, -3, runningEventId);
+	lua_pop(luaState, 2);
+
+	// reset global value of this event
+	lua_pushnil(luaState);
+	lua_setglobal(luaState, eventName.data());
+
+	cacheFiles[runningEventId] = fmt::format("{}:{}", loadingFile, eventName);
+	return runningEventId++;
+}
+
+int32_t LuaScriptInterface::getEvent()
+{
+	// check if function is on the stack
+	if (!Lua::isFunction(luaState, -1)) {
+		return -1;
+	}
+
+	// get our events table
+	lua_rawgeti(luaState, LUA_REGISTRYINDEX, eventTableRef);
+	if (!Lua::isTable(luaState, -1)) {
+		lua_pop(luaState, 1);
+		return -1;
+	}
+
+	// save in our events table
+	lua_pushvalue(luaState, -2);
+	lua_rawseti(luaState, -2, runningEventId);
+	lua_pop(luaState, 2);
+
+	cacheFiles[runningEventId] = loadingFile + ":callback";
+	return runningEventId++;
+}
+
+int32_t LuaScriptInterface::getMetaEvent(std::string_view globalName, std::string_view eventName)
+{
+	// get our events table
+	lua_rawgeti(luaState, LUA_REGISTRYINDEX, eventTableRef);
+	if (!Lua::isTable(luaState, -1)) {
+		lua_pop(luaState, 1);
+		return -1;
+	}
+
+	// get current event function pointer
+	lua_getglobal(luaState, globalName.data());
+	lua_getfield(luaState, -1, eventName.data());
+	if (!Lua::isFunction(luaState, -1)) {
+		lua_pop(luaState, 3);
+		return -1;
+	}
+
+	// save in our events table
+	lua_pushvalue(luaState, -1);
+	lua_rawseti(luaState, -4, runningEventId);
+	lua_pop(luaState, 1);
+
+	// reset global value of this event
+	lua_pushnil(luaState);
+	lua_setfield(luaState, -2, eventName.data());
+	lua_pop(luaState, 2);
+
+	cacheFiles[runningEventId] = fmt::format("{}:{}@{}", loadingFile, globalName, eventName);
+	return runningEventId++;
+}
+
+void LuaScriptInterface::removeEvent(int32_t scriptId)
+{
+	if (scriptId == -1) {
+		return;
+	}
+
+	// get our events table
+	lua_rawgeti(luaState, LUA_REGISTRYINDEX, eventTableRef);
+	if (!Lua::isTable(luaState, -1)) {
+		lua_pop(luaState, 1);
+		return;
+	}
+
+	// remove event from table
+	lua_pushnil(luaState);
+	lua_rawseti(luaState, -2, scriptId);
+	lua_pop(luaState, 1);
+
+	cacheFiles.erase(scriptId);
+}
+
+std::string_view LuaScriptInterface::getFileById(int32_t scriptId)
+{
+	if (scriptId == EVENT_ID_LOADING) {
+		return loadingFile;
+	}
+
+	auto it = cacheFiles.find(scriptId);
+	if (it == cacheFiles.end()) {
+		return "(Unknown scriptfile)";
+	}
+	return it->second;
+}
+
+const std::string& LuaScriptInterface::getFileByIdForStats(int32_t scriptId)
+{
+	auto it = cacheFiles.find(scriptId);
+	if (it == cacheFiles.end()) {
+		static const std::string& unk = "(Unknown scriptfile)";
+		return unk;
+	}
+	return it->second;
+}
+
+std::string LuaScriptInterface::getStackTrace(lua_State* L, std::string_view error_desc)
+{
+	std::string errorStr(error_desc);
+	luaL_traceback(L, L, errorStr.c_str(), 1);
+	return Lua::popString(L);
+}
+
+void LuaScriptInterface::reportError(const char* function, std::string_view error_desc, lua_State* L /*= nullptr*/,
+                                     bool stack_trace /*= false*/)
+{
+	int32_t scriptId;
+	int32_t callbackId;
+	bool timerEvent;
+	LuaScriptInterface* scriptInterface;
+	getScriptEnv()->getEventInfo(scriptId, scriptInterface, callbackId, timerEvent);
+
+	LOG_ERROR("Lua Script Error: ");
+
+	if (scriptInterface) {
+		LOG_ERROR(fmt::format("[{}] ", scriptInterface->getInterfaceName()));
+
+		if (timerEvent) {
+			LOG_ERROR("in a timer event called from: ");
+		}
+
+		if (callbackId) {
+			LOG_ERROR(fmt::format("in callback: {}", scriptInterface->getFileById(callbackId)));
+		}
+
+		LOG_ERROR(scriptInterface->getFileById(scriptId));
+	}
+
+	if (function) {
+		LOG_ERROR(fmt::format("{}(). ", function));
+	}
+
+	if (L && stack_trace) {
+		LOG_ERROR(getStackTrace(L, error_desc));
+	} else {
+		LOG_ERROR(error_desc);
+	}
+}
+
+bool LuaScriptInterface::pushFunction(int32_t functionId)
+{
+	setLuaCrashPhase("LuaScriptInterface::pushFunction / registry lookup");
+	lua_rawgeti(luaState, LUA_REGISTRYINDEX, eventTableRef);
+	if (!Lua::isTable(luaState, -1)) {
+		return false;
+	}
+
+	lua_rawgeti(luaState, -1, functionId);
+	lua_replace(luaState, -2);
+	return Lua::isFunction(luaState, -1);
+}
+
+bool LuaScriptInterface::initState()
+{
+	luaState = g_luaEnvironment.getLuaState();
+	if (!luaState) {
+		return false;
+	}
+
+	lua_newtable(luaState);
+	eventTableRef = luaL_ref(luaState, LUA_REGISTRYINDEX);
+	runningEventId = EVENT_ID_USER;
+	return true;
+}
+
+bool LuaScriptInterface::closeState()
+{
+	if (!g_luaEnvironment.getLuaState() || !luaState) {
+		return false;
+	}
+
+	cacheFiles.clear();
+	if (eventTableRef != -1) {
+		luaL_unref(luaState, LUA_REGISTRYINDEX, eventTableRef);
+		eventTableRef = -1;
+	}
+
+	luaState = nullptr;
+	return true;
+}
+
+int LuaScriptInterface::luaErrorHandler(lua_State* L)
+{
+	const std::string& errorMessage = Lua::popString(L);
+	Lua::pushString(L, LuaScriptInterface::getStackTrace(L, errorMessage));
+	return 1;
+}
+
+bool LuaScriptInterface::callFunction(int params)
+{
+	int32_t scriptId;
+	int32_t callbackId;
+	bool timerEvent;
+	LuaScriptInterface* scriptInterface;
+	getScriptEnv()->getEventInfo(scriptId, scriptInterface, callbackId, timerEvent);
+	(void)callbackId;
+	(void)timerEvent;
+	const bool slowTaskWarning = getBoolean(ConfigManager::SLOW_TASK_WARNING);
+	uint64_t slowThresholdNs = SLOW_TASK_THRESHOLD_NS;
+	if (slowTaskWarning) {
+		const int64_t reactorBudgetMs = getInteger(ConfigManager::REACTOR_TIME_BUDGET_MS);
+		if (reactorBudgetMs > 0) {
+			slowThresholdNs = static_cast<uint64_t>(reactorBudgetMs) * 1'000'000;
+		}
+	}
+#ifdef STATS_ENABLED
+	const bool shouldCollectStats = g_stats.isEnabled() && g_stats.isRunning();
+	const bool shouldMeasure = slowTaskWarning || shouldCollectStats;
+#else
+	const bool shouldMeasure = slowTaskWarning;
+#endif
+	const auto time_point = shouldMeasure ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+
+	bool result = false;
+	int size = lua_gettop(luaState);
+	if (protectedCall(luaState, params, 1) != 0) {
+		LuaScriptInterface::reportError(nullptr, Lua::getString(luaState, -1));
+	} else {
+		result = Lua::getBoolean(luaState, -1);
+	}
+
+	lua_pop(luaState, 1);
+	if ((lua_gettop(luaState) + params + 1) != size) {
+		LuaScriptInterface::reportError(nullptr, "Stack size changed!");
+		lua_settop(luaState, size - params - 1);
+	}
+
+	if (shouldMeasure) {
+		const uint64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+		    std::chrono::steady_clock::now() - time_point).count();
+		if (slowTaskWarning && ns > slowThresholdNs) {
+			const auto& scriptFile = scriptInterface ? scriptInterface->getFileByIdForStats(scriptId) :
+			                                           getFileByIdForStats(scriptId);
+			LOG_WARN(">> Slow Lua callback detected: {}ms [{}]",
+			         ns / 1'000'000, scriptFile);
+		}
+#ifdef STATS_ENABLED
+		if (shouldCollectStats && g_stats.isEnabled() && g_stats.isRunning()) {
+			const auto& scriptFile = scriptInterface ? scriptInterface->getFileByIdForStats(scriptId) :
+			                                           getFileByIdForStats(scriptId);
+			g_stats.addLuaStats(std::make_unique<Stat>(ns, scriptFile, ""));
+		}
+#endif
+	}
+
+	resetScriptEnv();
+	return result;
+}
+
+void LuaScriptInterface::callVoidFunction(int params)
+{
+	int32_t scriptId;
+	int32_t callbackId;
+	bool timerEvent;
+	LuaScriptInterface* scriptInterface;
+	getScriptEnv()->getEventInfo(scriptId, scriptInterface, callbackId, timerEvent);
+	(void)callbackId;
+	const bool slowTaskWarning = getBoolean(ConfigManager::SLOW_TASK_WARNING);
+	uint64_t slowThresholdNs = SLOW_TASK_THRESHOLD_NS;
+	if (slowTaskWarning) {
+		const int64_t reactorBudgetMs = getInteger(ConfigManager::REACTOR_TIME_BUDGET_MS);
+		if (reactorBudgetMs > 0) {
+			slowThresholdNs = static_cast<uint64_t>(reactorBudgetMs) * 1'000'000;
+		}
+	}
+#ifdef STATS_ENABLED
+	const bool shouldCollectStats = g_stats.isEnabled() && g_stats.isRunning();
+	const bool shouldMeasure = slowTaskWarning || shouldCollectStats;
+#else
+	const bool shouldMeasure = slowTaskWarning;
+#endif
+	const std::string timerOrigin = shouldMeasure && timerEvent ? getScriptEnv()->getTimerEventOrigin() : std::string{};
+	const auto time_point = shouldMeasure ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+
+	int size = lua_gettop(luaState);
+	if (protectedCall(luaState, params, 0) != 0) {
+		LuaScriptInterface::reportError(nullptr, Lua::popString(luaState));
+	}
+
+	if ((lua_gettop(luaState) + params + 1) != size) {
+		LuaScriptInterface::reportError(nullptr, "Stack size changed!");
+		lua_settop(luaState, size - params - 1);
+	}
+
+	if (shouldMeasure) {
+		const uint64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+		    std::chrono::steady_clock::now() - time_point).count();
+		if (slowTaskWarning && ns > slowThresholdNs) {
+			const std::string scriptFile = !timerOrigin.empty() ? timerOrigin :
+			    (scriptInterface ? scriptInterface->getFileByIdForStats(scriptId) : getFileByIdForStats(scriptId));
+			LOG_WARN(">> Slow Lua callback detected: {}ms [{}]",
+			         ns / 1'000'000, scriptFile);
+		}
+#ifdef STATS_ENABLED
+		if (shouldCollectStats && g_stats.isEnabled() && g_stats.isRunning()) {
+			const std::string scriptFile = !timerOrigin.empty() ? timerOrigin :
+			    (scriptInterface ? scriptInterface->getFileByIdForStats(scriptId) : getFileByIdForStats(scriptId));
+			g_stats.addLuaStats(std::make_unique<Stat>(ns, scriptFile, ""));
+		}
+#endif
+	}
+
+	resetScriptEnv();
+}
+
+ReturnValue LuaScriptInterface::callReturnValueFunction(int params)
+{
+	int size = lua_gettop(luaState);
+	if (protectedCall(luaState, params, 0) != 0) {
+		LuaScriptInterface::reportError(nullptr, Lua::popString(luaState));
+		return RETURNVALUE_NOTPOSSIBLE;
+	}
+
+	if ((lua_gettop(luaState) + params + 1) != size) {
+		LuaScriptInterface::reportError(nullptr, "Stack size changed!");
+		lua_settop(luaState, size - params - 1);
+		return RETURNVALUE_NOTPOSSIBLE;
+	}
+
+	resetScriptEnv();
+	return Lua::getInteger<ReturnValue>(luaState, -1);
+}
+
+void Lua::pushVariant(lua_State* L, const LuaVariant& var)
+{
+	lua_createtable(L, 0, 3);
+	setField(L, "type", var.type());
+	setField(L, "instantName", var.instantName);
+	switch (var.type()) {
+		case VARIANT_NUMBER:
+			setField(L, "number", var.getNumber());
+			break;
+		case VARIANT_STRING:
+			setField(L, "string", var.getString());
+			break;
+		case VARIANT_TARGETPOSITION:
+			pushPosition(L, var.getTargetPosition());
+			lua_setfield(L, -2, "pos");
+			break;
+		case VARIANT_POSITION: {
+			pushPosition(L, var.getPosition());
+			lua_setfield(L, -2, "pos");
+			break;
+		}
+		default:
+			break;
+	}
+	setMetatable(L, -1, "Variant");
+}
+
+bool Lua::pushItem(lua_State* L, Item* item)
+{
+	if (!item) {
+		lua_pushnil(L);
+		return false;
+	}
+
+	if (auto itemRef = item->weak_from_this().lock()) {
+		pushSharedPtr(L, std::move(itemRef));
+		setItemMetatable(L, -1, item);
+		return true;
+	}
+
+#ifndef NDEBUG
+	LOG_WARN(fmt::format("[Lua::pushItem] Item has no shared ownership, pushing nil: {}",
+	                     static_cast<const void*>(item)));
+#endif
+	lua_pushnil(L);
+	return false;
+}
+
+void Lua::pushThing(lua_State* L, Thing* thing)
+{
+	if (!thing) {
+		lua_createtable(L, 0, 4);
+		setField(L, "uid", 0);
+		setField(L, "itemid", 0);
+		setField(L, "actionid", 0);
+		setField(L, "type", 0);
+		return;
+	}
+
+	if (Item* item = thing->getItem()) {
+		pushItem(L, item);
+	} else if (Creature* creature = thing->getCreature()) {
+		pushUserdata<Creature>(L, creature);
+		setCreatureMetatable(L, -1, creature);
+	} else {
+		lua_pushnil(L);
+	}
+}
+
+void Lua::pushCylinder(lua_State* L, Cylinder* cylinder)
+{
+	if (Creature* creature = cylinder->getCreature()) {
+		pushUserdata<Creature>(L, creature);
+		setCreatureMetatable(L, -1, creature);
+	} else if (Item* parentItem = cylinder->getItem()) {
+		pushItem(L, parentItem);
+	} else if (Tile* tile = cylinder->getTile()) {
+		pushUserdata<Tile>(L, tile);
+		setMetatable(L, -1, "Tile");
+	} else if (cylinder == VirtualCylinder::virtualCylinder) {
+		pushBoolean(L, true);
+	} else {
+		lua_pushnil(L);
+	}
+}
+
+void Lua::pushString(lua_State* L, std::string_view value) { lua_pushlstring(L, value.data(), value.length()); }
+
+void Lua::pushCallback(lua_State* L, int32_t callback) { lua_rawgeti(L, LUA_REGISTRYINDEX, callback); }
+
+std::string Lua::popString(lua_State* L)
+{
+	if (lua_gettop(L) == 0) {
+		return {};
+	}
+
+	auto str = getString(L, -1);
+	lua_pop(L, 1);
+	return str;
+}
+
+int32_t Lua::popCallback(lua_State* L) { return luaL_ref(L, LUA_REGISTRYINDEX); }
+
+// Metatables
+void Lua::setMetatable(lua_State* L, int32_t index, std::string_view name)
+{
+	luaL_getmetatable(L, name.data());
+	lua_setmetatable(L, index - 1);
+	if (name == "Tile") {
+		if (Tile** userdata = static_cast<Tile**>(lua_touserdata(L, index))) {
+			if (*userdata) {
+				new (lua_newuserdatauv(L, sizeof(std::weak_ptr<Tile>), 0))
+				    std::weak_ptr<Tile>((*userdata)->weak_from_this());
+				lua_setiuservalue(L, index - 1, 1);
+			}
+		}
+	}
+}
+
+void Lua::setWeakMetatable(lua_State* L, int32_t index, std::string_view name)
+{
+	static std::set<std::string> weakObjectTypes;
+	const std::string& weakName = fmt::format("{}{}", name, "_weak");
+
+	auto result = weakObjectTypes.emplace(name);
+	if (result.second) {
+		luaL_getmetatable(L, name.data());
+		int childMetatable = lua_gettop(L);
+
+		luaL_newmetatable(L, weakName.c_str());
+		int metatable = lua_gettop(L);
+
+		for (std::string_view metaKey : {"__index", "__metatable", "__eq"}) {
+			lua_getfield(L, childMetatable, metaKey.data());
+			lua_setfield(L, metatable, metaKey.data());
+		}
+
+		for (auto metaIndex : {'h', 'p', 't'}) {
+			lua_rawgeti(L, childMetatable, metaIndex);
+			lua_rawseti(L, metatable, metaIndex);
+		}
+
+		lua_pushnil(L);
+		lua_setfield(L, metatable, "__gc");
+
+		lua_remove(L, childMetatable);
+	} else {
+		luaL_getmetatable(L, weakName.c_str());
+	}
+	lua_setmetatable(L, index - 1);
+}
+
+void Lua::setItemMetatable(lua_State* L, int32_t index, const Item* item)
+{
+	if (item->getContainer()) {
+		luaL_getmetatable(L, "Container");
+	} else if (item->getTeleport()) {
+		luaL_getmetatable(L, "Teleport");
+	} else {
+		luaL_getmetatable(L, "Item");
+	}
+	lua_setmetatable(L, index - 1);
+}
+
+void Lua::setCreatureMetatable(lua_State* L, int32_t index, const Creature* creature)
+{
+	setLuaCrashPhase("Lua::setCreatureMetatable / select creature metatable");
+	if (creature->isPlayer()) {
+		luaL_getmetatable(L, "Player");
+	} else if (creature->isMonster()) {
+		luaL_getmetatable(L, "Monster");
+	} else if (creature->isNpc()) {
+		luaL_getmetatable(L, "Npc");
+	} else {
+		assert(false && "Unknown creature type in Lua::setCreatureMetatable");
+		LOG_ERROR("[Lua::setCreatureMetatable] Unknown creature type: {}", static_cast<int32_t>(creature->getType()));
+		luaL_getmetatable(L, "Creature");
+	}
+	setLuaCrashPhase("Lua::setCreatureMetatable / lua_setmetatable");
+	lua_setmetatable(L, index - 1);
+
+	setLuaCrashPhase("Lua::setCreatureMetatable / allocate weak ownership userdata");
+	new (lua_newuserdatauv(L, sizeof(std::weak_ptr<Creature>), 0))
+	    std::weak_ptr<Creature>(g_game.getCreatureWeakRef(creature));
+	setLuaCrashPhase("Lua::setCreatureMetatable / lua_setiuservalue weak ownership");
+	lua_setiuservalue(L, index - 1, 1);
+}
+
+Creature* Lua::getValidatedCreatureUserdata(lua_State* L, int32_t arg)
+{
+	Creature* rawCreature = nullptr;
+	if (Creature** userdata = static_cast<Creature**>(lua_touserdata(L, arg))) {
+		rawCreature = *userdata;
+	}
+
+	const int userValueType = lua_getiuservalue(L, arg, 1);
+	if (userValueType == LUA_TUSERDATA) {
+		auto* weakPtr = static_cast<std::weak_ptr<Creature>*>(lua_touserdata(L, -1));
+		auto creatureRef = weakPtr ? weakPtr->lock() : std::shared_ptr<Creature>{};
+		lua_pop(L, 1);
+
+		if (creatureRef && !creatureRef->isRemoved()) {
+			return creatureRef.get();
+		}
+
+		return nullptr;
+	}
+	if (userValueType != LUA_TNONE) {
+		lua_pop(L, 1);
+	}
+
+	if (!rawCreature || !Creature::isAlive(rawCreature) || rawCreature->isRemoved()) {
+		return nullptr;
+	}
+	return rawCreature;
+}
+
+Tile* Lua::getValidatedTileUserdata(lua_State* L, int32_t arg)
+{
+	const int userValueType = lua_getiuservalue(L, arg, 1);
+	if (userValueType == LUA_TUSERDATA) {
+		auto* weakPtr = static_cast<std::weak_ptr<Tile>*>(lua_touserdata(L, -1));
+		auto tileRef = weakPtr ? weakPtr->lock() : std::shared_ptr<Tile>{};
+		lua_pop(L, 1);
+
+		if (tileRef) {
+			return tileRef.get();
+		}
+
+		return nullptr;
+	}
+	lua_pop(L, 1);
+	// A Tile must have its ownership token; never revive an unvalidated raw address.
+	return nullptr;
+}
+
+// Is
+bool Lua::isNone(lua_State* L, int32_t arg) { return lua_isnone(L, arg); }
+bool Lua::isNumber(lua_State* L, int32_t arg) { return lua_type(L, arg) == LUA_TNUMBER; }
+bool Lua::isInteger(lua_State* L, int32_t arg) { return lua_isinteger(L, arg) != 0; }
+bool Lua::isString(lua_State* L, int32_t arg) { return lua_isstring(L, arg) != 0; }
+bool Lua::isBoolean(lua_State* L, int32_t arg) { return lua_isboolean(L, arg); }
+bool Lua::isTable(lua_State* L, int32_t arg) { return lua_istable(L, arg); }
+bool Lua::isFunction(lua_State* L, int32_t arg) { return lua_isfunction(L, arg); }
+bool Lua::isUserdata(lua_State* L, int32_t arg) { return lua_isuserdata(L, arg) != 0; }
+
+// Get
+bool Lua::getBoolean(lua_State* L, int32_t arg) { return lua_toboolean(L, arg) != 0; }
+bool Lua::getBoolean(lua_State* L, int32_t arg, bool defaultValue)
+{
+	const auto parameters = lua_gettop(L);
+	if (parameters == 0 || arg > parameters) {
+		return defaultValue;
+	}
+	return lua_toboolean(L, arg) != 0;
+}
+
+std::string Lua::getString(lua_State* L, int32_t arg)
+{
+	size_t len;
+	const char* c_str = lua_tolstring(L, arg, &len);
+	if (!c_str || len == 0) {
+		return {};
+	}
+	return {c_str, len};
+}
+
+std::string_view Lua::getStringView(lua_State *L, int32_t arg)
+{
+	size_t len;
+	const char *c_str = lua_tolstring(L, arg, &len);
+	if (!c_str || len == 0) {
+		return {};
+	}
+	return {c_str, len};
+}
+
+Position Lua::getPosition(lua_State* L, int32_t arg, int32_t& stackpos)
+{
+	Position position;
+	position.x = getField<uint16_t>(L, arg, "x");
+	position.y = getField<uint16_t>(L, arg, "y");
+	position.z = getField<uint8_t>(L, arg, "z");
+
+	lua_getfield(L, arg, "stackpos");
+	if (lua_isnil(L, -1) == 1) {
+		stackpos = 0;
+	} else {
+		stackpos = getInteger<int32_t>(L, -1);
+	}
+
+	lua_pop(L, 4);
+	return position;
+}
+
+Position Lua::getPosition(lua_State* L, int32_t arg)
+{
+	Position position;
+	position.x = getField<uint16_t>(L, arg, "x");
+	position.y = getField<uint16_t>(L, arg, "y");
+	position.z = getField<uint8_t>(L, arg, "z");
+
+	lua_pop(L, 3);
+	return position;
+}
+
+Outfit_t Lua::getOutfit(lua_State* L, int32_t arg)
+{
+	Outfit_t outfit;
+	outfit.lookAddons = getField<uint8_t>(L, arg, "lookAddons");
+
+	outfit.lookFeet = getField<uint8_t>(L, arg, "lookFeet");
+	outfit.lookLegs = getField<uint8_t>(L, arg, "lookLegs");
+	outfit.lookBody = getField<uint8_t>(L, arg, "lookBody");
+	outfit.lookHead = getField<uint8_t>(L, arg, "lookHead");
+
+	outfit.lookTypeEx = getField<uint16_t>(L, arg, "lookTypeEx");
+	outfit.lookType = getField<uint16_t>(L, arg, "lookType");
+	outfit.lookFamiliar = getField<uint16_t>(L, arg, "lookFamiliar");
+
+	lua_pop(L, 8);
+	return outfit;
+}
+
+Outfit Lua::getOutfitClass(lua_State* L, int32_t arg)
+{
+	uint16_t lookType = getField<uint16_t>(L, arg, "lookType");
+	PlayerSex_t sex = getField<PlayerSex_t>(L, arg, "sex");
+	auto name = getFieldString(L, arg, "name");
+	bool premium = getField<uint8_t>(L, arg, "premium") == 1;
+	bool unlocked = getField<uint8_t>(L, arg, "unlocked") == 1;
+	lua_pop(L, 5);
+	return {name, lookType, sex, premium, unlocked};
+}
+
+LuaVariant Lua::getVariant(lua_State* L, int32_t arg)
+{
+	LuaVariant var;
+	var.instantName = getFieldString(L, arg, "instantName");
+	lua_pop(L, 1);
+	switch (getField<LuaVariantType_t>(L, arg, "type")) {
+		case VARIANT_NUMBER: {
+			var.setNumber(getField<uint32_t>(L, arg, "number"));
+			lua_pop(L, 2);
+			break;
+		}
+
+		case VARIANT_STRING: {
+			var.setString(getFieldString(L, arg, "string"));
+			lua_pop(L, 2);
+			break;
+		}
+
+		case VARIANT_POSITION:
+			lua_getfield(L, arg, "pos");
+			var.setPosition(getPosition(L, lua_gettop(L)));
+			lua_pop(L, 2);
+			break;
+
+		case VARIANT_TARGETPOSITION: {
+			lua_getfield(L, arg, "pos");
+			var.setTargetPosition(getPosition(L, lua_gettop(L)));
+			lua_pop(L, 2);
+			break;
+		}
+
+		default: {
+			var = {};
+			lua_pop(L, 1);
+			break;
+		}
+	}
+	return var;
+}
+
+InstantSpell* Lua::getInstantSpell(lua_State* L, int32_t arg)
+{
+	InstantSpell* spell = g_spells->getInstantSpellByName(getFieldString(L, arg, "name"));
+	lua_pop(L, 1);
+	return spell;
+}
+
+Reflect Lua::getReflect(lua_State* L, int32_t arg)
+{
+	uint16_t percent = getField<uint16_t>(L, arg, "percent");
+	uint16_t chance = getField<uint16_t>(L, arg, "chance");
+	lua_pop(L, 2);
+	return Reflect(percent, chance);
+}
+
+Thing* Lua::getThing(lua_State* L, int32_t arg)
+{
+	Thing* thing;
+	if (lua_getmetatable(L, arg) != 0) {
+		lua_rawgeti(L, -1, 't');
+		switch (getInteger<uint32_t>(L, -1)) {
+			case LuaData_Item:
+				thing = getSharedPtr<Item>(L, arg).get();
+				break;
+			case LuaData_Container:
+				thing = getSharedPtr<Item>(L, arg)->getContainer();
+				break;
+			case LuaData_Teleport:
+				thing = getSharedPtr<Item>(L, arg)->getTeleport();
+				break;
+			case LuaData_Player:
+				thing = getUserdata<Player>(L, arg);
+				break;
+			case LuaData_Monster:
+				thing = getUserdata<Monster>(L, arg);
+				break;
+			case LuaData_Npc:
+				thing = getUserdata<Npc>(L, arg);
+				break;
+			default:
+				thing = nullptr;
+				break;
+		}
+		lua_pop(L, 2);
+	} else {
+		thing = LuaScriptInterface::getScriptEnv()->getThingByUID(getInteger<uint32_t>(L, arg));
+	}
+	return thing;
+}
+
+Creature* Lua::getCreature(lua_State* L, int32_t arg)
+{
+	if (isUserdata(L, arg)) {
+		return getUserdata<Creature>(L, arg);
+	}
+
+	const uint32_t creatureId = getInteger<uint32_t>(L, arg);
+	std::shared_ptr<Creature> creatureRef;
+	Creature* creature = nullptr;
+	if (LuaScriptInterface::hasScriptEnv()) {
+		creature = LuaScriptInterface::getScriptEnv()->getCreatureByUID(creatureId);
+	} else {
+		creatureRef = g_game.getCreatureByIDShared(creatureId);
+		creature = creatureRef.get();
+	}
+
+	if (!creature || !Creature::isAlive(creature) || creature->isRemoved()) {
+		return nullptr;
+	}
+	return creature;
+}
+
+Player* Lua::getPlayer(lua_State* L, int32_t arg)
+{
+	if (isUserdata(L, arg)) {
+		return getUserdata<Player>(L, arg);
+	}
+
+	std::shared_ptr<Player> player;
+	if (lua_type(L, arg) == LUA_TSTRING) {
+		player = g_game.getPlayerByName(getString(L, arg));
+	} else {
+		const uint32_t identifier = getInteger<uint32_t>(L, arg);
+		player = g_game.getPlayerByID(identifier);
+		if (!player) {
+			player = g_game.getPlayerByGUID(identifier);
+		}
+	}
+	if (!player || !Creature::isAlive(player.get()) || player->isRemoved()) {
+		return nullptr;
+	}
+	return player.get();
+}
+
+std::string Lua::getFieldString(lua_State* L, int32_t arg, std::string_view key)
+{
+	lua_getfield(L, arg, key.data());
+	return getString(L, -1);
+}
+
+LuaDataType Lua::getUserdataType(lua_State* L, int32_t arg)
+{
+	if (lua_getmetatable(L, arg) == 0) {
+		return LuaData_Unknown;
+	}
+	lua_rawgeti(L, -1, 't');
+
+	LuaDataType type = getInteger<LuaDataType>(L, -1);
+	lua_pop(L, 2);
+
+	return type;
+}
+
+std::optional<uint8_t> Lua::getBlessingId(lua_State* L, int32_t arg)
+{
+	uint8_t blessing = getInteger<uint8_t>(L, arg);
+	if (blessing < 1 || blessing > PLAYER_MAX_BLESSINGS) {
+		reportErrorFunc(
+		    L, fmt::format("Invalid blessing id: {} (must be between 1 and {})", blessing, PLAYER_MAX_BLESSINGS));
+		return std::nullopt;
+	}
+
+	return std::make_optional(blessing);
+}
+
+// Push
+void Lua::pushBoolean(lua_State* L, bool value) { lua_pushboolean(L, value ? 1 : 0); }
+
+void Lua::pushCombatDamage(lua_State* L, const CombatDamage& damage)
+{
+	lua_pushinteger(L, damage.primary.value);
+	lua_pushinteger(L, damage.primary.type);
+	lua_pushinteger(L, damage.secondary.value);
+	lua_pushinteger(L, damage.secondary.type);
+	lua_pushinteger(L, damage.origin);
+}
+
+void Lua::pushInstantSpell(lua_State* L, const InstantSpell& spell)
+{
+	lua_createtable(L, 0, 7);
+
+	setField(L, "name", spell.getName());
+	setField(L, "words", spell.getWords());
+	setField(L, "level", spell.getLevel());
+	setField(L, "mlevel", spell.getMagicLevel());
+	setField(L, "mana", spell.getMana());
+	setField(L, "manapercent", spell.getManaPercent());
+	setField(L, "params", spell.getHasParam());
+
+	setMetatable(L, -1, "Spell");
+}
+
+void Lua::pushSpell(lua_State* L, const Spell& spell)
+{
+	lua_createtable(L, 0, 5);
+
+	setField(L, "name", spell.getName());
+	setField(L, "level", spell.getLevel());
+	setField(L, "mlevel", spell.getMagicLevel());
+	setField(L, "mana", spell.getMana());
+	setField(L, "manapercent", spell.getManaPercent());
+
+	setMetatable(L, -1, "Spell");
+}
+
+void Lua::pushPosition(lua_State* L, const Position& position, int32_t stackpos /* = 0*/, uint32_t instanceId /* = 0*/)
+{
+	lua_createtable(L, 0, 5);
+
+	setField(L, "x", position.x);
+	setField(L, "y", position.y);
+	setField(L, "z", position.z);
+	setField(L, "stackpos", stackpos);
+	setField(L, "instanceId", instanceId);
+
+	setMetatable(L, -1, "Position");
+}
+
+void Lua::pushOutfit(lua_State* L, const Outfit_t& outfit)
+{
+	lua_createtable(L, 0, 9);
+	setField(L, "lookType", outfit.lookType);
+	setField(L, "lookTypeEx", outfit.lookTypeEx);
+	setField(L, "lookMount", outfit.lookMount);
+	setField(L, "lookHead", outfit.lookHead);
+	setField(L, "lookBody", outfit.lookBody);
+	setField(L, "lookLegs", outfit.lookLegs);
+	setField(L, "lookFeet", outfit.lookFeet);
+	setField(L, "lookAddons", outfit.lookAddons);
+	setField(L, "lookFamiliar", outfit.lookFamiliar);
+}
+
+void Lua::pushOutfit(lua_State* L, const Outfit* outfit)
+{
+	lua_createtable(L, 0, 5);
+	setField(L, "lookType", outfit->lookType);
+	setField(L, "sex", outfit->sex);
+	setField(L, "name", outfit->name);
+	setField(L, "premium", outfit->premium);
+	setField(L, "unlocked", outfit->unlocked);
+	setMetatable(L, -1, "Outfit");
+}
+
+void Lua::pushMount(lua_State* L, const Mount* mount)
+{
+	lua_createtable(L, 0, 5);
+	setField(L, "name", mount->name);
+	setField(L, "speed", mount->speed);
+	setField(L, "clientId", mount->clientId);
+	setField(L, "id", mount->id);
+	setField(L, "premium", mount->premium);
+}
+
+void Lua::pushLoot(lua_State* L, const std::vector<LootBlock>& lootList)
+{
+	lua_createtable(L, lootList.size(), 0);
+
+	int index = 0;
+	for (const auto& lootBlock : lootList) {
+		lua_createtable(L, 0, 7);
+
+		setField(L, "itemId", lootBlock.id);
+		setField(L, "chance", lootBlock.chance);
+		setField(L, "subType", lootBlock.subType);
+		setField(L, "minCount", lootBlock.countmin);
+		setField(L, "maxCount", lootBlock.countmax);
+		setField(L, "actionId", lootBlock.actionId);
+		setField(L, "text", lootBlock.text);
+
+		pushLoot(L, lootBlock.childLoot);
+		lua_setfield(L, -2, "childLoot");
+
+		lua_rawseti(L, -2, ++index);
+	}
+}
+
+void Lua::pushReflect(lua_State* L, const Reflect& reflect)
+{
+	lua_createtable(L, 0, 2);
+	setField(L, "percent", reflect.percent);
+	setField(L, "chance", reflect.chance);
+}
+
+#define registerEnum(value) \
+	{ \
+		std::string enumName = #value; \
+		registerGlobalVariable(enumName.substr(enumName.find_last_of(':') + 1), value); \
+	}
+#define registerEnumIn(tableName, value) \
+	{ \
+		std::string enumName = #value; \
+		registerVariable(tableName, enumName.substr(enumName.find_last_of(':') + 1), static_cast<int64_t>(value)); \
+	}
+#define registerEnumClass(value) \
+	{ \
+		const std::string enumClassName = #value; \
+		const size_t found = enumClassName.find_last_of(':'); \
+		registerVariable(enumClassName.substr(0, found - 1), enumClassName.substr(found + 1), \
+		                 static_cast<int64_t>(value)); \
+	}
+
+/**
+ * @brief Register the full Lua scripting API into the interface's Lua state.
+ *
+ * Populates the global Lua environment and registry with server-facing functions, tables,
+ * enums, global variables, and userdata class/metatable registrations required by scripts.
+ * This includes core utility functions (items, combat, events, world/config/database access),
+ * config key entries, a comprehensive set of enum constants, helper tables/methods (os/table),
+ * and initialization of all module bindings (game, item, creature, combat, conditions, XML, etc.).
+ *
+ * The function mutates the interface's lua_State by creating globals, registering C functions,
+ * and storing metatables/references used by script execution and scheduled timer events.
+ */
+void LuaScriptInterface::registerFunctions()
+{
+	// doPlayerAddItem(uid, itemid, <optional: default: 1> count/subtype)
+	// doPlayerAddItem(cid, itemid, <optional: default: 1> count, <optional: default: 1> canDropOnMap, <optional:
+	// default: 1>subtype) Returns uid of the created item
+	lua_register(luaState, "doPlayerAddItem", LuaScriptInterface::luaDoPlayerAddItem);
+
+	// transformToSHA1(text)
+	lua_register(luaState, "transformToSHA1", LuaScriptInterface::luaTransformToSHA1);
+
+	// isValidUID(uid)
+	lua_register(luaState, "isValidUID", LuaScriptInterface::luaIsValidUID);
+
+	// isDepot(uid)
+	lua_register(luaState, "isDepot", LuaScriptInterface::luaIsDepot);
+
+	// isMovable(uid)
+	lua_register(luaState, "isMovable", LuaScriptInterface::luaIsMoveable);
+
+	// doAddContainerItem(uid, itemid, <optional> count/subtype)
+	lua_register(luaState, "doAddContainerItem", LuaScriptInterface::luaDoAddContainerItem);
+
+	// getDepotId(uid)
+	lua_register(luaState, "getDepotId", LuaScriptInterface::luaGetDepotId);
+
+	// getWorldTime()
+	lua_register(luaState, "getWorldTime", LuaScriptInterface::luaGetWorldTime);
+
+	// getWorldLight()
+	lua_register(luaState, "getWorldLight", LuaScriptInterface::luaGetWorldLight);
+
+	// setWorldLight(level, color)
+	lua_register(luaState, "setWorldLight", LuaScriptInterface::luaSetWorldLight);
+
+	// getWorldUpTime()
+	lua_register(luaState, "getWorldUpTime", LuaScriptInterface::luaGetWorldUpTime);
+
+	// getSubTypeName(subType)
+	lua_register(luaState, "getSubTypeName", LuaScriptInterface::luaGetSubTypeName);
+
+	// createCombatArea( {area}, <optional> {extArea} )
+	lua_register(luaState, "createCombatArea", LuaScriptInterface::luaCreateCombatArea);
+
+	// doAreaCombat(cid, type, pos, area, min, max, effect[, origin = ORIGIN_SPELL[, blockArmor = false[, blockShield =
+	// false[, ignoreResistances = false]]]])
+	lua_register(luaState, "doAreaCombat", LuaScriptInterface::luaDoAreaCombat);
+
+	// doTargetCombat(cid, target, type, min, max, effect[, origin = ORIGIN_SPELL[, blockArmor = false[, blockShield =
+	// false[, ignoreResistances = false]]]])
+	lua_register(luaState, "doTargetCombat", LuaScriptInterface::luaDoTargetCombat);
+
+	// doChallengeCreature(cid, target[, force = false])
+	lua_register(luaState, "doChallengeCreature", LuaScriptInterface::luaDoChallengeCreature);
+
+	// addEvent(callback, delay, ...)
+	lua_register(luaState, "addEvent", LuaScriptInterface::luaAddEvent);
+
+	// stopEvent(eventid)
+	lua_register(luaState, "stopEvent", LuaScriptInterface::luaStopEvent);
+
+	// saveServer()
+	lua_register(luaState, "saveServer", LuaScriptInterface::luaSaveServer);
+
+	// cleanMap()
+	lua_register(luaState, "cleanMap", LuaScriptInterface::luaCleanMap);
+
+	// debugPrint(text)
+	lua_register(luaState, "debugPrint", LuaScriptInterface::luaDebugPrint);
+
+	// logInfo(text)
+	lua_register(luaState, "logInfo", LuaScriptInterface::luaLogInfo);
+
+	// logMigration(text)
+	lua_register(luaState, "logMigration", LuaScriptInterface::luaLogMigration);
+
+	// logWarning(text)
+	lua_register(luaState, "logWarning", LuaScriptInterface::luaLogWarning);
+
+	// logError(text)
+	lua_register(luaState, "logError", LuaScriptInterface::luaLogError);
+
+	// isInWar(cid, target)
+	lua_register(luaState, "isInWar", LuaScriptInterface::luaIsInWar);
+
+	// getWaypointPosition(name)
+	lua_register(luaState, "getWaypointPositionByName", LuaScriptInterface::luaGetWaypointPositionByName);
+
+	// sendChannelMessage(channelId, type, message)
+	lua_register(luaState, "sendChannelMessage", LuaScriptInterface::luaSendChannelMessage);
+
+	// sendGuildChannelMessage(guildId, type, message)
+	lua_register(luaState, "sendGuildChannelMessage", LuaScriptInterface::luaSendGuildChannelMessage);
+
+	// isScriptsInterface()
+	lua_register(luaState, "isScriptsInterface", LuaScriptInterface::luaIsScriptsInterface);
+
+	// configManager table
+	luaL_register(luaState, "configManager", LuaScriptInterface::luaConfigManagerTable);
+	lua_pop(luaState, 1);
+
+	// db table
+	luaL_register(luaState, "db", LuaScriptInterface::luaDatabaseTable);
+	lua_pop(luaState, 1);
+
+	// result table
+	luaL_register(luaState, "result", LuaScriptInterface::luaResultTable);
+	lua_pop(luaState, 1);
+
+	/* New functions */
+	// registerClass(className, baseClass, newFunction)
+	// registerTable(tableName)
+	// registerMethod(className, functionName, function)
+	// registerMetaMethod(className, functionName, function)
+	// registerGlobalMethod(functionName, function)
+	// registerVariable(tableName, name, value)
+	// registerGlobalVariable(name, value)
+	// registerEnum(value)
+	// registerEnumIn(tableName, value)
+	// registerEnumClass(value)
+
+	// Enums
+	registerEnum(ACCOUNT_TYPE_NORMAL);
+	registerEnum(ACCOUNT_TYPE_TUTOR);
+	registerEnum(ACCOUNT_TYPE_SENIORTUTOR);
+	registerEnum(ACCOUNT_TYPE_GAMEMASTER);
+	registerEnum(ACCOUNT_TYPE_COMMUNITYMANAGER);
+	registerEnum(ACCOUNT_TYPE_GOD);
+
+	registerGlobalVariable("RESET_SYSTEM_ENABLED", ConfigManager::RESET_SYSTEM_ENABLED);
+
+	registerGlobalVariable("AUTOLOOT_MAXITEMS_FREE", ConfigManager::AUTOLOOT_MAXITEMS_FREE);
+	registerGlobalVariable("AUTOLOOT_MAXITEMS_PREMIUM", ConfigManager::AUTOLOOT_MAXITEMS_PREMIUM);
+
+	registerGlobalVariable("STORAGE_FAMILIAR_SUMMON_TIME", STORAGE_FAMILIAR_SUMMON_TIME);
+	registerGlobalVariable("STORAGE_FAMILIAR_TIMER_10", STORAGE_FAMILIAR_TIMER_10);
+	registerGlobalVariable("STORAGE_FAMILIAR_TIMER_60", STORAGE_FAMILIAR_TIMER_60);
+	registerGlobalVariable("STORAGE_EXP_COLOR", STORAGE_EXP_COLOR);
+	registerGlobalVariable("STORAGE_HEALTH_DISPLAY", STORAGE_HEALTH_DISPLAY);
+	registerGlobalVariable("STORAGE_EMOTE_SPELLS", STORAGE_EMOTE_SPELLS);
+	registerGlobalVariable("FORGE_SYSTEM_ENABLED", ConfigManager::FORGE_SYSTEM_ENABLED);
+	registerGlobalVariable("IMBUEMENT_SYSTEM_ENABLED", ConfigManager::IMBUEMENT_SYSTEM_ENABLED);
+	registerGlobalVariable("MONK_VOCATION_ENABLED", ConfigManager::MONK_VOCATION_ENABLED);
+	registerGlobalVariable("FAMILIAR_SYSTEM_ENABLED", ConfigManager::FAMILIAR_SYSTEM_ENABLED);
+	registerGlobalVariable("WHEEL_SYSTEM_ENABLED", ConfigManager::WHEEL_SYSTEM_ENABLED);
+	registerGlobalVariable("BESTIARY_SYSTEM_ENABLED", ConfigManager::BESTIARY_SYSTEM_ENABLED);
+	registerGlobalVariable("ECHO_RAID_SYSTEM_ENABLED", ConfigManager::ECHO_RAID_SYSTEM_ENABLED);
+	registerGlobalVariable("MARKET_SYSTEM_ENABLED", ConfigManager::MARKET_SYSTEM_ENABLED);
+	registerGlobalVariable("PREY_SYSTEM_ENABLED", ConfigManager::PREY_SYSTEM_ENABLED);
+	registerGlobalVariable("BATTLEPASS_SYSTEM_ENABLED", ConfigManager::BATTLEPASS_SYSTEM_ENABLED);
+	registerGlobalVariable("WEAPON_PROFICIENCY_SYSTEM_ENABLED", ConfigManager::WEAPON_PROFICIENCY_SYSTEM_ENABLED);
+	registerGlobalVariable("AUGMENT_SYSTEM_ENABLED", ConfigManager::AUGMENT_SYSTEM_ENABLED);
+	registerGlobalVariable("COLORIZED_LOOT_VALUE", ConfigManager::COLORIZED_LOOT_VALUE);
+	registerGlobalVariable("ITEM_TIER_DISPLAY", ConfigManager::ITEM_TIER_DISPLAY);
+	registerGlobalVariable("ITEM_UPGRADE_CLASSIFICATION", ConfigManager::ITEM_UPGRADE_CLASSIFICATION);
+	registerGlobalVariable("MIN_TASK_INTERVAL", MIN_TASK_INTERVAL);
+
+	registerGlobalVariable("ACCOUNT_MANAGER_NONE", static_cast<uint8_t>(AccountManagerMode::ACCOUNT_MANAGER_NONE));
+	registerGlobalVariable("ACCOUNT_MANAGER_NEW", static_cast<uint8_t>(AccountManagerMode::ACCOUNT_MANAGER_NEW));
+	registerGlobalVariable("ACCOUNT_MANAGER_ACCOUNT", static_cast<uint8_t>(AccountManagerMode::ACCOUNT_MANAGER_ACCOUNT));
+	registerGlobalVariable("ACCOUNT_MANAGER_NAMELOCK", static_cast<uint8_t>(AccountManagerMode::ACCOUNT_MANAGER_NAMELOCK));
+
+
+	registerEnum(AMMO_NONE);
+	registerEnum(AMMO_BOLT);
+	registerEnum(AMMO_ARROW);
+	registerEnum(AMMO_SPEAR);
+	registerEnum(AMMO_THROWINGSTAR);
+	registerEnum(AMMO_THROWINGKNIFE);
+	registerEnum(AMMO_STONE);
+	registerEnum(AMMO_SNOWBALL);
+
+	registerEnum(BUG_CATEGORY_MAP);
+	registerEnum(BUG_CATEGORY_TYPO);
+	registerEnum(BUG_CATEGORY_TECHNICAL);
+	registerEnum(BUG_CATEGORY_OTHER);
+
+	// CallBackParam
+	registerTable("CallBackParam");
+
+	registerEnumClass(CallBackParam::LEVELMAGICVALUE);
+	registerEnumClass(CallBackParam::SKILLVALUE);
+	registerEnumClass(CallBackParam::TARGETTILE);
+	registerEnumClass(CallBackParam::TARGETCREATURE);
+	registerEnumClass(CallBackParam::CHAINVALUE);
+	registerEnumClass(CallBackParam::CHAINPICKER);
+
+	// Global aliases for backwards compatibility
+	registerGlobalVariable("CALLBACK_PARAM_LEVELMAGICVALUE", static_cast<int64_t>(CallBackParam::LEVELMAGICVALUE));
+	registerGlobalVariable("CALLBACK_PARAM_SKILLVALUE", static_cast<int64_t>(CallBackParam::SKILLVALUE));
+	registerGlobalVariable("CALLBACK_PARAM_TARGETTILE", static_cast<int64_t>(CallBackParam::TARGETTILE));
+	registerGlobalVariable("CALLBACK_PARAM_TARGETCREATURE", static_cast<int64_t>(CallBackParam::TARGETCREATURE));
+	registerGlobalVariable("CALLBACK_PARAM_CHAINVALUE", static_cast<int64_t>(CallBackParam::CHAINVALUE));
+	registerGlobalVariable("CALLBACK_PARAM_CHAINPICKER", static_cast<int64_t>(CallBackParam::CHAINPICKER));
+
+	// ExperienceRateType
+	registerTable("ExperienceRateType");
+
+	registerEnumClass(ExperienceRateType::BASE);
+	registerEnumClass(ExperienceRateType::LOW_LEVEL);
+	registerEnumClass(ExperienceRateType::BONUS);
+	registerEnumClass(ExperienceRateType::STAMINA);
+
+	// Combat Formula
+	registerEnum(COMBAT_FORMULA_UNDEFINED);
+	registerEnum(COMBAT_FORMULA_LEVELMAGIC);
+	registerEnum(COMBAT_FORMULA_SKILL);
+	registerEnum(COMBAT_FORMULA_DAMAGE);
+
+	// Direction
+	registerEnum(DIRECTION_NORTH);
+	registerEnum(DIRECTION_EAST);
+	registerEnum(DIRECTION_SOUTH);
+	registerEnum(DIRECTION_WEST);
+	registerEnum(DIRECTION_SOUTHWEST);
+	registerEnum(DIRECTION_SOUTHEAST);
+	registerEnum(DIRECTION_NORTHWEST);
+	registerEnum(DIRECTION_NORTHEAST);
+
+	registerEnum(COMBAT_NONE);
+	registerEnum(COMBAT_PHYSICALDAMAGE);
+	registerEnum(COMBAT_ENERGYDAMAGE);
+	registerEnum(COMBAT_EARTHDAMAGE);
+	registerEnum(COMBAT_FIREDAMAGE);
+	registerEnum(COMBAT_UNDEFINEDDAMAGE);
+	registerEnum(COMBAT_LIFEDRAIN);
+	registerEnum(COMBAT_MANADRAIN);
+	registerEnum(COMBAT_HEALING);
+	registerEnum(COMBAT_DROWNDAMAGE);
+	registerEnum(COMBAT_ICEDAMAGE);
+	registerEnum(COMBAT_HOLYDAMAGE);
+	registerEnum(COMBAT_DEATHDAMAGE);
+	registerEnum(COMBAT_AGONYDAMAGE);
+
+	registerEnum(COMBAT_PARAM_TYPE);
+	registerEnum(COMBAT_PARAM_EFFECT);
+	registerEnum(COMBAT_PARAM_DISTANCEEFFECT);
+	registerEnum(COMBAT_PARAM_BLOCKSHIELD);
+	registerEnum(COMBAT_PARAM_BLOCKARMOR);
+	registerEnum(COMBAT_PARAM_TARGETCASTERORTOPMOST);
+	registerEnum(COMBAT_PARAM_CREATEITEM);
+	registerEnum(COMBAT_PARAM_AGGRESSIVE);
+	registerEnum(COMBAT_PARAM_DISPEL);
+	registerEnum(COMBAT_PARAM_USECHARGES);
+	registerEnum(COMBAT_PARAM_CHAIN_EFFECT);
+	registerEnum(COMBAT_PARAM_RESET_DAMAGE_MULTIPLIER);
+	registerEnum(COMBAT_PARAM_CASTSOUND);
+	registerEnum(COMBAT_PARAM_IMPACTSOUND);
+
+	// CrystalServer SoundEffect_t IDs, shared with the client sound catalog.
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SILENCE", 0);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_HUMAN_CLOSE_ATK_FIST", 1);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_CLOSE_ATK_FIST", 2);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MELEE_ATK_SWORD", 3);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MELEE_ATK_CLUB", 4);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MELEE_ATK_AXE", 5);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_DIST_ATK_BOW", 6);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_DIST_ATK_CROSSBOW", 7);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_DIST_ATK_THROW", 8);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MAGICAL_RANGE_ATK", 9);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_OR_RUNE", 10);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_OTHER", 11);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_PHYSICAL_RANGE_MISS", 12);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_DIST_ATK_BOW_SHOT", 13);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_DIST_ATK_CROSSBOW_SHOT", 14);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_DIST_ATK_THROW_SHOT", 15);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_DIST_ATK_ROD_SHOT", 16);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_DIST_ATK_WAND_SHOT", 17);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_BURST_ARROW_EFFECT", 18);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_DIAMOND_ARROW_EFFECT", 19);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_NO_DAMAGE", 20);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_MELEE_ATK_FIST", 100);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_MELEE_ATK_CLAW", 101);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_MELEE_ATK_BITE", 102);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_MELEE_ATK_RIP", 103);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_MELEE_ATK_ACID", 104);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_MELEE_ATK_MAGIC", 105);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_MELEE_ATK_ETHEREAL", 106);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_MELEE_ATK_CONSTRUCT", 107);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_LIGHT_HEALING", 1001);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_INTENSE_HEALING", 1002);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ULTIMATE_HEALING", 1003);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_INTENSE_HEALING_RUNE", 1004);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ULTIMATE_HEALING_RUNE", 1005);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_HASTE", 1006);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_LIGHT_MAGIC_MISSILE_RUNE", 1007);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_HEAVY_MAGIC_MISSILE_RUNE", 1008);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_SUMMON_CREATURE", 1009);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_LIGHT", 1010);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_GREAT_LIGHT", 1011);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_CONVINCE_CREATURE_RUNE", 1012);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ENERGY_WAVE", 1013);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_CHAMELEON_RUNE", 1014);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_FIREBALL_RUNE", 1015);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_GREAT_FIREBALL_RUNE", 1016);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_FIRE_BOMB_RUNE", 1017);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_EXPLOSION_RUNE", 1018);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_FIRE_WAVE", 1019);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_FIND_PERSON", 1020);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_SUDDENDEATH_RUNE", 1021);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ENERGY_BEAM", 1022);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_GREAT_ENERGY_BEAM", 1023);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_HELL_SCORE", 1024);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_FIRE_FIELD_RUNE", 1025);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_POISON_FIELD_RUNE", 1026);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ENERGY_FIELD_RUNE", 1027);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_FIRE_WALL_RUNE", 1028);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_CURE_POISON", 1029);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_DESTROY_FIELD_RUNE", 1030);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_CURE_POISON_RUNE", 1031);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_POISON_WALL_RUNE", 1032);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ENERGY_WALL_RUNE", 1033);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_SALVATION", 1036);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_CREATURE_ILLUSION", 1038);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_STRONG_HASTE", 1039);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_FOOD", 1042);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_STRONG_ICE_WAVE", 1043);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_MAGIC_SHIELD", 1044);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_INVISIBLE", 1045);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_CONJURE_EXPLOSIVE_ARROW", 1049);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_SOUL_FIRE_RUNE", 1050);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_CONJURE_ARROW", 1051);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_PARALYSE_RUNE", 1054);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ENERGY_BOMB_RUNE", 1055);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_WRATH_OF_NATURE", 1056);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_STRONG_ETHEREAL_SPEAR", 1057);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_FRONT_SWEEP", 1059);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_BRUTAL_STRIKE", 1061);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ANNIHILATION", 1062);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_INVITE_GUESTS", 1071);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_INVITE_SUBOWNERS", 1072);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_KICK_GUEST", 1073);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_EDIT_DOOR", 1074);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ULTIMATE_LIGHT", 1075);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_MAGIC_ROPE", 1076);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_STALAGMITE_RUNE", 1077);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_DISINTEGRATE_RUNE", 1078);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_BERSERK", 1080);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_LEVITATE", 1081);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_MASS_HEALING", 1082);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ANIMATE_DEAD_RUNE", 1083);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_HEAL_FRIEND", 1084);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_UNDEAD_LEGION", 1085);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_MAGIC_WALL_RUNE", 1086);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_DEATH_STRIKE", 1087);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ENERGY_STRIKE", 1088);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_FLAME_STRIKE", 1089);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_CANCEL_INVISIBILITY", 1090);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_POISON_BOMB_RUNE", 1091);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_CONJURE_WAND_OF_DARKNESS", 1092);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_CHALLENGE", 1093);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_WILD_GROWTH_RUNE", 1094);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_FIERCE_BERSERK", 1105);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_GROUNDSHAKER", 1106);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_WHIRLWIND_THROW", 1107);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ENCHANT_SPEAR", 1110);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ETHEREAL_SPEAR", 1111);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ICE_STRIKE", 1112);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_TERRA_STRIKE", 1113);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ICICLE_RUNE", 1114);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_AVALANCHE_RUNE", 1115);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_STONE_SHOWER_RUNE", 1116);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_THUNDERSTORM_RUNE", 1117);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ETERNAL_WINTER", 1118);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_RAGE_OF_THE_SKIES", 1119);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_TERRA_WAVE", 1120);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ICE_WAVE", 1121);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_DIVINE_MISSILE", 1122);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_WOUND_CLEANSING", 1123);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_DIVINE_CALDERA", 1124);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_DIVINE_HEALING", 1125);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_TRAIN_PARTY", 1126);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_PROTECT_PARTY", 1127);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_HEAL_PARTY", 1128);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ENCHANT_PARTY", 1129);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_HOLY_MISSILE_RUNE", 1130);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_CHARGE", 1131);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_PROTECTOR", 1132);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_BLOOD_RAGE", 1133);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_SWIFT_FOOT", 1134);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_SHARPSHOOTER", 1135);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_IGNITE", 1138);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_CURSE", 1139);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ELECTRIFY", 1140);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_INFLICT_WOUND", 1141);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ENVENOM", 1142);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_HOLY_FLASH", 1143);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_CURE_BLEEDING", 1144);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_CURE_BURNING", 1145);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_CURE_ELECTRIFICATION", 1146);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_CURE_CURSE", 1147);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_PHYSICAL_STRIKE", 1148);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_LIGHTNING", 1149);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_STRONG_FLAME_STRIKE", 1150);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_STRONG_ENERGY_STRIKE", 1151);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_STRONG_ICE_STRIKE", 1152);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_STRONG_TERRA_STRIKE", 1153);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ULTIMATE_FLAME_STRIKE", 1154);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ULTIMATE_ENERGY_STRIKE", 1155);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ULTIMATE_ICE_STRIKE", 1156);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ULTIMATE_TERRA_STRIKE", 1157);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_INTENSE_WOUND_CLEANSING", 1158);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_RECOVERY", 1159);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_INTENSE_RECOVERY", 1160);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_PRACTISE_HEALING", 1166);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_PRACTISE_FIRE_WAVE", 1167);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_PRACTISE_MAGIC_MISSILE_RUNE", 1168);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_APPRENT_ICES_STRIKE", 1169);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_MUD_ATTACK", 1172);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_CHILL_OUT", 1173);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_MAGIC_PATCH", 1174);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_BRUISE_BANE", 1175);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_ARROW_CALL", 1176);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_BUZZ", 1177);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_SCORCH", 1178);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_LIGHTEST_MISSILE_RUNE", 1179);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_LIGHT_STONE_SHOWER_RUNE", 1180);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_SUMMON_KNIGHT_FAMILIAR", 1194);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_SUMMON_PALADIN_FAMILIAR", 1195);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_SUMMON_SORCERER_FAMILIAR", 1196);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_SUMMON_DRUID_FAMILIAR", 1197);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_CHIVALROUS_CHALLENGE", 1237);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_DIVINE_DAZZLE", 1238);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_FAIR_WOUND_CLEANSING", 1239);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_GREAT_FIRE_WAVE", 1240);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_RESTORATION", 1241);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_NATURES_EMBRACE", 1242);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_EXPOSE_WEAKNESS", 1243);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_SAP_STRENGTH", 1244);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_CANCEL_MAGIC_SHIELD", 1245);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SINGLE_TARGET_FIRE", 2002);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SINGLE_TARGET_ENERGY", 2003);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SINGLE_TARGET_EARTH", 2004);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SINGLE_TARGET_ICE", 2005);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SINGLE_TARGET_DEATH", 2006);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SINGLE_TARGET_HOLY", 2007);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SINGLE_TARGET_HIT", 2008);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SINGLE_TARGET_LIFEDRAIN", 2009);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SINGLE_TARGET_MANADRAIN", 2010);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SINGLE_TARGET_DROWNING", 2011);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SINGLE_TARGET_BLEEDING", 2012);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SINGLE_TARGET_HEALING", 2013);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SMALL_AREA_FIRE", 2015);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SMALL_AREA_ENERGY", 2016);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SMALL_AREA_EARTH", 2017);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SMALL_AREA_ICE", 2018);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SMALL_AREA_DEATH", 2019);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SMALL_AREA_HOLY", 2020);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SMALL_AREA_HIT", 2021);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SMALL_AREA_LIFEDRAIN", 2022);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SMALL_AREA_MANADRAIN", 2023);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SMALL_AREA_DROWNING", 2024);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SMALL_AREA_BLEEDING", 2025);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SMALL_AREA_HEALING", 2026);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_LARGE_AREA_FIRE", 2028);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_LARGE_AREA_ENERGY", 2029);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_LARGE_AREA_EARTH", 2030);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_LARGE_AREA_ICE", 2031);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_LARGE_AREA_DEATH", 2032);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_LARGE_AREA_HOLY", 2033);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_LARGE_AREA_HIT", 2034);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_LARGE_AREA_LIFEDRAIN", 2035);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_LARGE_AREA_MANADRAIN", 2036);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_LARGE_AREA_DROWNING", 2037);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_LARGE_AREA_BLEEDING", 2038);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_LARGE_AREA_HEALING", 2039);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_WAVE_FIRE", 2041);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_WAVE_ENERGY", 2042);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_WAVE_EARTH", 2043);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_WAVE_ICE", 2044);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_WAVE_DEATH", 2045);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_WAVE_HOLY", 2046);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_WAVE_HIT", 2047);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_WAVE_LIFEDRAIN", 2048);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_WAVE_MANADRAIN", 2049);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_WAVE_DROWNING", 2050);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_WAVE_BLEEDING", 2051);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_WAVE_HEALING", 2052);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_DELETEFIELD", 2054);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_CHALLENGE", 2055);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SPEED", 2056);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_DRUNKEN", 2057);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_STRENGTH", 2058);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_OUTFIT", 2059);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SUMMON", 2060);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_MAGICLEVEL", 2061);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_TELEPORT", 2062);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_HEX", 2063);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_SUPER_DRUNKEN", 2064);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_ROOT", 2065);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_FEAR", 2066);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_HIGHRISK_TELEPORT", 2067);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_MINION", 2068);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_SPELL_AGONY", 2069);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_AMPHIBIC_BARK", 2500);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_AQUATIC_BEAST_BARK", 2501);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_AQUATIC_CRITTER_BARK", 2502);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_AQUATIC_DEEPLING_BARK", 2503);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_AQUATIC_QUARA_BARK", 2504);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_BIRD_BARK", 2505);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_CONSTRUCT_BARK", 2506);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_DEMON_BARK", 2507);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_DRAGON_BARK", 2508);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ELEMENTAL_EARTH_BARK", 2509);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ELEMENTAL_ENERGY_BARK", 2510);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ELEMENTAL_FIRE_BARK", 2511);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ELEMENTAL_WATER_BARK", 2512);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_EXTRA_DIMENSIONAL_BEAST_BARK", 2513);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_EXTRA_DIMENSIONAL_ENERGY_BARK", 2514);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_EXTRA_DIMENSIONAL_HORROR_BARK", 2515);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_FEY_BARK", 2516);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_GIANT_BARK", 2517);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_HUMAN_FEMALE_BARK", 2518);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_HUMAN_MALE_BARK", 2519);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_HUMANOID_GOBLIN_BARK", 2520);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_HUMANOID_ORC_BARK", 2521);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_LYCANTHROPE_BARK", 2522);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MAGICAL_ENERGY_BARK", 2523);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MAGICAL_HORROR_BARK", 2524);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MAMMAL_BEAR_BARK", 2525);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MAMMAL_CRITTER_BARK", 2526);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MAMMAL_DOG_BARK", 2527);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MAMMAL_ELEPHANT_BARK", 2528);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MAMMAL_FERAL_BARK", 2529);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MAMMAL_HORSE_BARK", 2530);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MAMMAL_MAMMOTH_BARK", 2531);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_BARK", 2532);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_PHANTOM_BARK", 2533);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_PLANT_BARK", 2534);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_REPTILE_LARGE_BARK", 2535);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_REPTILE_SMALL_BARK", 2536);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SLIME_BARK", 2537);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_UNDEAD_BARK", 2538);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_VERMIN_CRITTER_BARK", 2539);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_VERMIN_INSECT_BARK", 2540);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_VERMIN_ROTWORM_BARK", 2541);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_HUMAN_SAGE_BARK", 2542);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_HUMAN_CRONE_BARK", 2543);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_APE_BARK", 2544);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_AMPHIBIC_DEATH", 2600);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_AQUATIC_BEAST_DEATH", 2601);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_AQUATIC_CRITTER_DEATH", 2602);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_AQUATIC_DEEPLING_DEATH", 2603);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_AQUATIC_QUARA_DEATH", 2604);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_BIRD_DEATH", 2605);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_CONSTRUCT_DEATH", 2606);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_DEMON_DEATH", 2607);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_DRAGON_DEATH", 2608);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ELEMENTAL_EARTH_DEATH", 2609);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ELEMENTAL_ENERGY_DEATH", 2610);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ELEMENTAL_FIRE_DEATH", 2611);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ELEMENTAL_WATER_DEATH", 2612);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_EXTRA_DIMENSIONAL_BEAST_DEATH", 2613);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_EXTRA_DIMENSIONAL_ENERGY_DEATH", 2614);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_EXTRA_DIMENSIONAL_HORROR_DEATH", 2615);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_FEY_DEATH", 2616);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_GIANT_DEATH", 2617);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_HUMAN_FEMALE_DEATH", 2618);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_HUMAN_MALE_DEATH", 2619);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_HUMANOID_GOBLIN_DEATH", 2620);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_HUMANOID_ORC_DEATH", 2621);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_LYCANTHROPE_DEATH", 2622);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MAGICAL_ENERGY_DEATH", 2623);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MAGICAL_HORROR_DEATH", 2624);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MAMMAL_BEAR_DEATH", 2625);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MAMMAL_CRITTER_DEATH", 2626);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MAMMAL_DOG_DEATH", 2627);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MAMMAL_ELEPHANT_DEATH", 2628);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MAMMAL_FERAL_DEATH", 2629);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MAMMAL_HORSE_DEATH", 2630);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MAMMAL_MAMMOTH_DEATH", 2631);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MONSTER_DEATH", 2632);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_PHANTOM_DEATH", 2633);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_PLANT_DEATH", 2634);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_REPTILE_LARGE_DEATH", 2635);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_REPTILE_SMALL_DEATH", 2636);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SLIME_DEATH", 2637);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_UNDEAD_DEATH", 2638);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_VERMIN_CRITTER_DEATH", 2639);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_VERMIN_INSECT_DEATH", 2640);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_VERMIN_ROTWORM_DEATH", 2641);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_HUMAN_SAGE_DEATH", 2642);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_HUMAN_CRONE_DEATH", 2643);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_APE_DEATH", 2644);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_UNKNOWN_CREATURE_DEATH_1", 2645);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_UNKNOWN_CREATURE_DEATH_2", 2646);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_UNKNOWN_CREATURE_DEATH_3", 2647);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_UNKNOWN_CREATURE_DEATH_4", 2648);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_HEAVY_METAL_LOUD", 2649);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_INSECTS_BIRDS", 2651);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_WIND_1", 2652);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_WIND_CLOSE", 2653);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_WATER_DEPTH_BOAT_SURFACE", 2654);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_METALIC_SPACE", 2655);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_FROGS_INSECTS_WOODS", 2656);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_WATER_DEPTH", 2657);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_SEA_WAVE", 2658);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_WIND_2", 2659);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_WIND_3", 2660);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_MONKEYS", 2661);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_STORM_COMING", 2662);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_HITTING_WOOD", 2663);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_WOOD_STICK_SMASH", 2664);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_THICK_BLOB_LIQUID_1", 2665);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_LITTLE_BIRTS_FLOREST", 2666);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_THICK_BLOCK_LIQUID_CLOSE", 2667);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_METAL_CHAINS_MOVING", 2668);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_CRICKET_1", 2669);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_CRICKET_2", 2670);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_CRICKET_3", 2671);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_CICADA_1", 2672);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_STONES_FALLING", 2673);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_OPEN_DOOR", 2674);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_CLOSE_DOOR", 2675);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_OWL", 2676);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_ELETRONIC_DEVICE", 2678);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_REPTILE_NOISE", 2679);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_FORGE_METAL_1", 2680);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_FROG", 2681);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_WOOD_OBJECT_USING", 2682);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_METAL_OBJECT_HIT", 2683);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_NAIL_HIT", 2684);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_BELL_RING", 2685);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_HOT_METAL_ON_WATER", 2686);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_WATER_SMOKE", 2687);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_WOLF_HOWL", 2688);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_WOOD_CRACKLE_CLOSE", 2689);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_LAUGHT", 2690);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_WIND_MOVING_LEAF", 2691);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_WIND_MOVING_FEW_LEAF", 2692);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_PORTAL_CAST", 2693);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_FIRE_MAGIC_CAST", 2694);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_TRAPDOOR_OPEN", 2695);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_NAIL_FALLING", 2696);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_LIGHT_BLOB_LIQUID", 2697);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_LION_ROAR", 2698);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_MOVING_OBJECT_BUTTON_TRIGGER", 2699);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_SNAKE_1", 2700);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_HUMAN_SCREEN_1", 2701);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_HUMAN_SCREEN_2", 2702);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_SEAGUL_1", 2703);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_FAST_FOOTSTEPS", 2704);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_SLOW_FOOTSTEPS", 2705);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_THICK_BLOB_LIQUID_2", 2706);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_MOVING_LEAF", 2707);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_WOOD_CRACKLE_1", 2708);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_OBJECT_FALLING_DEPTH", 2709);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_BUTTON_TRIGGER", 2710);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_HEAVEN_DARK_REVERB", 2711);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_WIND_4", 2712);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_INSECT_1", 2713);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_FLUTE_SONG", 2714);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_INSECTS_BIRDS_DEATH", 2715);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_INSECT_CREATURE_DEATH", 2716);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_LOW_ROAR", 2717);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_SINISTER_BURPH", 2718);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_CROWD_SCREEN", 2719);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_BIRDS_FLYING", 2720);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_CROWD_VOICES_1", 2721);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_BIRD_CUCO", 2722);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_RAVINE", 2723);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_RAVINE_METALIC", 2724);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_STICKS_LEAF_STEP", 2725);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_DISPEL_MAGIC_1", 2726);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_DISPEL_MAGIC_2", 2727);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_CROWD_VOICES_2", 2728);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_CROWD_VOICES_3", 2729);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_CROWD_VOICES_4", 2730);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_METAL_OBJECT_FALL", 2731);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_HOURSE_STEPS", 2732);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_DRUMES_SINISTER_REVERB", 2733);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_WOOD_PIECES_FALL", 2734);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_KNIFE_CUT_FLESH", 2735);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_CROWD_VOICES_5", 2736);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_CICADA_2", 2738);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_FLYES", 2739);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_NOISE_WATER", 2740);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_PIG_SOUND_1", 2741);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_PIG_SOUND_2", 2742);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_SHEEP_SOUND_1", 2743);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_SHEEP_SOUND_2", 2744);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_FIRE", 2745);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_NOISE_SNOW", 2746);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_FIRE_PLACE", 2747);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_WATERFALL", 2748);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_WATER_SOURCE", 2749);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_HAMMER_HITING_NAILS_1", 2750);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_HAMMER_HITING_NAILS_2", 2751);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_QUICK_STEPS", 2752);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_HEAVY_OBJECT_FALL", 2753);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_HITING_FORGE", 2754);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_WOOD_CRACKLE_2", 2755);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_WOOD_HIT", 2756);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MUSIC_CUT_BIRDS", 2757);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MUSIC_CUT_LITTLE_BIRDS", 2758);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MUSIC_CUT_INSECTS_1", 2759);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MUSIC_CUT_INSECTS_2", 2760);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MUSIC_CUT_INSECTS_3", 2761);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MUSIC_CUT_FLUTE_WEST", 2762);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MUSIC_CUT_CROWS_VOICES", 2763);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MUSIC_CUT_WIND_WATER", 2764);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_MUSIC_CUT_THICK_BLOCK_DEPTH", 2765);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_CAMEL", 2766);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_UNKNOWN_CREATURE_DEATH_5", 2767);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_CHICKEN_1", 2768);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_CHICKEN_2", 2769);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_THRILLER_METALLIC", 2770);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_NOTIFICATION", 2771);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_LEVEL_ACHIEVEMENT", 2772);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_SCREENSHOT", 2773);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_CLICK_ON", 2774);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_CLICK_OFF", 2775);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_DRUMS", 2776);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_XYLOPHONE_SLOW_DRUM", 2777);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_HARP_1", 2778);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_HARP_2", 2779);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_MOVING_WOOD", 2780);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_CRATE_BREAK_MAGIC_DUST", 2781);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_BELL_RING", 2783);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_SELECT_OBJECT", 2785);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ITEM_MOVE_BACKPACK", 2786);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ITEM_USE_POTION", 2787);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ITEM_MOVE_NECKLACES", 2788);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ITEM_MOVE_ARMORS", 2789);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ITEM_MOVE_METALIC", 2790);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ITEM_MOVE_DISTANCE", 2791);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ITEM_MOVE_WOOD", 2792);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ITEM_MOVE_STACKABLE", 2793);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ITEM_MOVE_DEFAULT", 2794);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ITEM_MOVE_LEGS", 2795);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ITEM_MOVE_HELMETS", 2796);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ITEM_MOVE_QUIVERS", 2797);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ITEM_MOVE_RINGS", 2798);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_FROG_OR_LIQUID", 2799);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_WOOD_OBJECT_HIT_STORE", 2800);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ITEM_MOVE_BOOTS", 2801);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_SWORD_DRAWN", 2802);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_EAT", 2803);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_STORE_BIG_OBJECT", 2804);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_STORE_WOOD_OBJECT", 2805);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_VIP_LOGOUT", 2806);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_VIP_LOGIN", 2807);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_CAT_1", 2808);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_INSECT_2", 2809);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_SEAGUL_2", 2810);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_LIQUID_SPILL", 2811);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_COW_MOO_1", 2813);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_COW_MOO_2", 2814);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_CAT_2", 2815);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_REAWRD_FEY", 2816);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_REWARD_GUITAR_1", 2817);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_REWARD_GUITAR_2", 2818);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_WOODS_WATER_SOURCE", 2819);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_HYENA", 2820);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_UNKNOWN_CREATURE_DEATH_6", 2821);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_COW_MOO_3", 2822);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_UNKNOWN_CREATURE_DEATH_7", 2823);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_METALIC_SPACE_ALIEN", 2824);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ACTION_AIR_STRIKE", 2825);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_WATER", 2828);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_ENV_SNAKE_2", 2829);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_GOD_SPELL_KILL_ALL_MONSTERS", 10001);
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_FLURRY_OF_BLOWS", 0); // No ID in the source sound enum.
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_DEVASTATING_KNOCKOUT", 0); // No ID in the source sound enum.
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_DOUBLE_JAB", 0); // No ID in the source sound enum.
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_FORCEFULL_UPPERCUT", 0); // No ID in the source sound enum.
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_GREATER_TIGER_CLASH", 0); // No ID in the source sound enum.
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_MYSTIC_REPULSE", 0); // No ID in the source sound enum.
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_SWEEPING_TAKEDOWN", 0); // No ID in the source sound enum.
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_SWIFT_JAB", 0); // No ID in the source sound enum.
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_SUMMON_MONK_FAMILIAR", 0); // No ID in the source sound enum.
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_MASS_SPIRIT_MEND", 0); // No ID in the source sound enum.
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_RESTORE_BALANCE", 0); // No ID in the source sound enum.
+	registerGlobalVariable("SOUND_EFFECT_TYPE_SPELL_SPIRIT_MEND", 0); // No ID in the source sound enum.
+
+	registerEnum(CONDITION_NONE);
+	registerEnum(CONDITION_POISON);
+	registerEnum(CONDITION_FIRE);
+	registerEnum(CONDITION_ENERGY);
+	registerEnum(CONDITION_BLEEDING);
+	registerEnum(CONDITION_HASTE);
+	registerEnum(CONDITION_PARALYZE);
+	registerEnum(CONDITION_OUTFIT);
+	registerEnum(CONDITION_INVISIBLE);
+	registerEnum(CONDITION_LIGHT);
+	registerEnum(CONDITION_MANASHIELD);
+	registerEnum(CONDITION_INFIGHT);
+	registerEnum(CONDITION_DRUNK);
+	registerEnum(CONDITION_EXHAUST_WEAPON);
+	registerEnum(CONDITION_REGENERATION);
+	registerEnum(CONDITION_SOUL);
+	registerEnum(CONDITION_DROWN);
+	registerEnum(CONDITION_MUTED);
+	registerEnum(CONDITION_CHANNELMUTEDTICKS);
+	registerEnum(CONDITION_YELLTICKS);
+	registerEnum(CONDITION_ATTRIBUTES);
+	registerEnum(CONDITION_FREEZING);
+	registerEnum(CONDITION_DAZZLED);
+	registerEnum(CONDITION_CURSED);
+	registerEnum(CONDITION_ROOTED);
+	registerEnum(CONDITION_FEARED);
+	registerEnum(CONDITION_AGONY);
+	registerEnum(CONDITION_EXHAUST_COMBAT);
+	registerEnum(CONDITION_EXHAUST_HEAL);
+	registerEnum(CONDITION_PACIFIED);
+	registerEnum(CONDITION_CLIPORT);
+	registerEnum(CONDITION_SPELLCOOLDOWN);
+	registerEnum(CONDITION_SPELLGROUPCOOLDOWN);
+	registerEnum(CONDITION_LESSERHEX);
+	registerEnum(CONDITION_INTENSEHEX);
+	registerEnum(CONDITION_GREATERHEX);
+	registerEnum(CONDITION_POWERLESS);
+	registerEnum(CreatureIconCategory_Quests);
+	registerEnum(CreatureIconCategory_Modifications);
+
+	registerEnum(CreatureIconModifications_None);
+	registerEnum(CreatureIconModifications_HigherDamageReceived);
+	registerEnum(CreatureIconModifications_LowerDamageDealt);
+	registerEnum(CreatureIconModifications_TurnedMelee);
+	registerEnum(CreatureIconModifications_Influenced);
+	registerEnum(CreatureIconModifications_Fiendish);
+	registerEnum(CreatureIconModifications_ReducedHealth);
+	registerEnum(CreatureIconModifications_ReducedHealthExclamation);
+
+	registerEnum(CreatureIconQuests_None);
+	registerEnum(CreatureIconQuests_WhiteCross);
+	registerEnum(CreatureIconQuests_RedCross);
+	registerEnum(CreatureIconQuests_RedBall);
+	registerEnum(CreatureIconQuests_GreenBall);
+	registerEnum(CreatureIconQuests_RedGreenBall);
+	registerEnum(CreatureIconQuests_GreenShield);
+	registerEnum(CreatureIconQuests_YellowShield);
+	registerEnum(CreatureIconQuests_BlueShield);
+	registerEnum(CreatureIconQuests_PurpleShield);
+	registerEnum(CreatureIconQuests_RedShield);
+	registerEnum(CreatureIconQuests_Dove);
+	registerEnum(CreatureIconQuests_Energy);
+	registerEnum(CreatureIconQuests_Earth);
+	registerEnum(CreatureIconQuests_Water);
+	registerEnum(CreatureIconQuests_Fire);
+	registerEnum(CreatureIconQuests_Ice);
+	registerEnum(CreatureIconQuests_ArrowUp);
+	registerEnum(CreatureIconQuests_ArrowDown);
+	registerEnum(CreatureIconQuests_ExclamationMark);
+	registerEnum(CreatureIconQuests_QuestionMark);
+	registerEnum(CreatureIconQuests_CancelMark);
+	registerEnum(CreatureIconQuests_Hazard);
+	registerEnum(CreatureIconQuests_BrownSkull);
+	registerEnum(CreatureIconQuests_BloodDrop);
+	registerEnum(CreatureIconQuests_Familiar);
+
+	registerEnum(CONDITIONID_DEFAULT);
+	registerEnum(CONDITIONID_COMBAT);
+	registerEnum(CONDITIONID_HEAD);
+	registerEnum(CONDITIONID_NECKLACE);
+	registerEnum(CONDITIONID_BACKPACK);
+	registerEnum(CONDITIONID_ARMOR);
+	registerEnum(CONDITIONID_RIGHT);
+	registerEnum(CONDITIONID_LEFT);
+	registerEnum(CONDITIONID_LEGS);
+	registerEnum(CONDITIONID_FEET);
+	registerEnum(CONDITIONID_RING);
+	registerEnum(CONDITIONID_AMMO);
+	registerEnum(CONDITIONID_OUTFIT);
+	registerEnum(CONDITIONID_MOUNT);
+
+	registerEnum(CONDITION_PARAM_OWNER);
+	registerEnum(CONDITION_PARAM_TICKS);
+	registerEnum(CONDITION_PARAM_DRUNKENNESS);
+	registerEnum(CONDITION_PARAM_HEALTHGAIN);
+	registerEnum(CONDITION_PARAM_HEALTHTICKS);
+	registerEnum(CONDITION_PARAM_MANAGAIN);
+	registerEnum(CONDITION_PARAM_MANATICKS);
+	registerEnum(CONDITION_PARAM_DELAYED);
+	registerEnum(CONDITION_PARAM_SPEED);
+	registerEnum(CONDITION_PARAM_LIGHT_LEVEL);
+	registerEnum(CONDITION_PARAM_LIGHT_COLOR);
+	registerEnum(CONDITION_PARAM_SOULGAIN);
+	registerEnum(CONDITION_PARAM_SOULTICKS);
+	registerEnum(CONDITION_PARAM_MINVALUE);
+	registerEnum(CONDITION_PARAM_MAXVALUE);
+	registerEnum(CONDITION_PARAM_STARTVALUE);
+	registerEnum(CONDITION_PARAM_TICKINTERVAL);
+	registerEnum(CONDITION_PARAM_FORCEUPDATE);
+	registerEnum(CONDITION_PARAM_SKILL_MELEE);
+	registerEnum(CONDITION_PARAM_SKILL_FIST);
+	registerEnum(CONDITION_PARAM_SKILL_CLUB);
+	registerEnum(CONDITION_PARAM_SKILL_SWORD);
+	registerEnum(CONDITION_PARAM_SKILL_AXE);
+	registerEnum(CONDITION_PARAM_SKILL_DISTANCE);
+	registerEnum(CONDITION_PARAM_SKILL_SHIELD);
+	registerEnum(CONDITION_PARAM_SKILL_FISHING);
+	registerEnum(CONDITION_PARAM_STAT_MAXHITPOINTS);
+	registerEnum(CONDITION_PARAM_STAT_MAXMANAPOINTS);
+	registerEnum(CONDITION_PARAM_STAT_MAGICPOINTS);
+	registerEnum(CONDITION_PARAM_STAT_MAXHITPOINTSPERCENT);
+	registerEnum(CONDITION_PARAM_STAT_MAXMANAPOINTSPERCENT);
+	registerEnum(CONDITION_PARAM_STAT_MAGICPOINTSPERCENT);
+	registerEnum(CONDITION_PARAM_STAT_CAPACITY);
+	registerEnum(CONDITION_PARAM_STAT_CAPACITYPERCENT);
+	registerEnum(CONDITION_PARAM_PERIODICDAMAGE);
+	registerEnum(CONDITION_PARAM_SKILL_MELEEPERCENT);
+	registerEnum(CONDITION_PARAM_SKILL_FISTPERCENT);
+	registerEnum(CONDITION_PARAM_SKILL_CLUBPERCENT);
+	registerEnum(CONDITION_PARAM_SKILL_SWORDPERCENT);
+	registerEnum(CONDITION_PARAM_SKILL_AXEPERCENT);
+	registerEnum(CONDITION_PARAM_SKILL_DISTANCEPERCENT);
+	registerEnum(CONDITION_PARAM_SKILL_SHIELDPERCENT);
+	registerEnum(CONDITION_PARAM_SKILL_FISHINGPERCENT);
+	registerEnum(CONDITION_PARAM_BUFF_SPELL);
+	registerEnum(CONDITION_PARAM_SUBID);
+	registerEnum(CONDITION_PARAM_FIELD);
+	registerEnum(CONDITION_PARAM_DISABLE_DEFENSE);
+	registerEnum(CONDITION_PARAM_SPECIALSKILL_CRITICALHITCHANCE);
+	registerEnum(CONDITION_PARAM_SPECIALSKILL_CRITICALHITAMOUNT);
+	registerEnum(CONDITION_PARAM_SPECIALSKILL_LIFELEECHCHANCE);
+	registerEnum(CONDITION_PARAM_SPECIALSKILL_LIFELEECHAMOUNT);
+	registerEnum(CONDITION_PARAM_SPECIALSKILL_MANALEECHCHANCE);
+	registerEnum(CONDITION_PARAM_SPECIALSKILL_MANALEECHAMOUNT);
+	registerEnum(CONDITION_PARAM_AGGRESSIVE);
+	registerEnum(CONDITION_PARAM_CASTER_POSITION);
+	registerEnum(CONDITION_PARAM_BUFF_DAMAGEDEALT);
+	registerEnum(CONDITION_PARAM_BUFF_DAMAGERECEIVED);
+	registerEnum(CONDITION_PARAM_BUFF_HEALINGRECEIVED);
+
+	registerEnum(RETURNVALUE_CANNOTMOVEEXERCISEWEAPON);
+	registerEnum(RETURNVALUE_CANNOTMOVEGOLDPOUCH);
+	registerEnum(RETURNVALUE_QUIVERAMMOONLY);
+
+	registerEnum(CONST_ME_NONE);
+	registerEnum(CONST_ME_DRAWBLOOD);
+	registerEnum(CONST_ME_LOSEENERGY);
+	registerEnum(CONST_ME_POFF);
+	registerEnum(CONST_ME_BLOCKHIT);
+	registerEnum(CONST_ME_EXPLOSIONAREA);
+	registerEnum(CONST_ME_EXPLOSIONHIT);
+	registerEnum(CONST_ME_FIREAREA);
+	registerEnum(CONST_ME_YELLOW_RINGS);
+	registerEnum(CONST_ME_GREEN_RINGS);
+	registerEnum(CONST_ME_HITAREA);
+	registerEnum(CONST_ME_TELEPORT);
+	registerEnum(CONST_ME_ENERGYHIT);
+	registerEnum(CONST_ME_MAGIC_BLUE);
+	registerEnum(CONST_ME_MAGIC_RED);
+	registerEnum(CONST_ME_MAGIC_GREEN);
+	registerEnum(CONST_ME_HITBYFIRE);
+	registerEnum(CONST_ME_HITBYPOISON);
+	registerEnum(CONST_ME_MORTAREA);
+	registerEnum(CONST_ME_SOUND_GREEN);
+	registerEnum(CONST_ME_SOUND_RED);
+	registerEnum(CONST_ME_POISONAREA);
+	registerEnum(CONST_ME_SOUND_YELLOW);
+	registerEnum(CONST_ME_SOUND_PURPLE);
+	registerEnum(CONST_ME_SOUND_BLUE);
+	registerEnum(CONST_ME_SOUND_WHITE);
+	registerEnum(CONST_ME_BUBBLES);
+	registerEnum(CONST_ME_CRAPS);
+	registerEnum(CONST_ME_GIFT_WRAPS);
+	registerEnum(CONST_ME_FIREWORK_YELLOW);
+	registerEnum(CONST_ME_FIREWORK_RED);
+	registerEnum(CONST_ME_FIREWORK_BLUE);
+	registerEnum(CONST_ME_STUN);
+	registerEnum(CONST_ME_SLEEP);
+	registerEnum(CONST_ME_WATERCREATURE);
+	registerEnum(CONST_ME_GROUNDSHAKER);
+	registerEnum(CONST_ME_HEARTS);
+	registerEnum(CONST_ME_FIREATTACK);
+	registerEnum(CONST_ME_ENERGYAREA);
+	registerEnum(CONST_ME_SMALLCLOUDS);
+	registerEnum(CONST_ME_HOLYDAMAGE);
+	registerEnum(CONST_ME_BIGCLOUDS);
+	registerEnum(CONST_ME_ICEAREA);
+	registerEnum(CONST_ME_ICETORNADO);
+	registerEnum(CONST_ME_ICEATTACK);
+	registerEnum(CONST_ME_STONES);
+	registerEnum(CONST_ME_SMALLPLANTS);
+	registerEnum(CONST_ME_CARNIPHILA);
+	registerEnum(CONST_ME_PURPLEENERGY);
+	registerEnum(CONST_ME_YELLOWENERGY);
+	registerEnum(CONST_ME_HOLYAREA);
+	registerEnum(CONST_ME_BIGPLANTS);
+	registerEnum(CONST_ME_CAKE);
+	registerEnum(CONST_ME_GIANTICE);
+	registerEnum(CONST_ME_WATERSPLASH);
+	registerEnum(CONST_ME_PLANTATTACK);
+	registerEnum(CONST_ME_TUTORIALARROW);
+	registerEnum(CONST_ME_TUTORIALSQUARE);
+	registerEnum(CONST_ME_MIRRORHORIZONTAL);
+	registerEnum(CONST_ME_MIRRORVERTICAL);
+	registerEnum(CONST_ME_SKULLHORIZONTAL);
+	registerEnum(CONST_ME_SKULLVERTICAL);
+	registerEnum(CONST_ME_ASSASSIN);
+	registerEnum(CONST_ME_STEPSHORIZONTAL);
+	registerEnum(CONST_ME_BLOODYSTEPS);
+	registerEnum(CONST_ME_STEPSVERTICAL);
+	registerEnum(CONST_ME_YALAHARIGHOST);
+	registerEnum(CONST_ME_BATS);
+	registerEnum(CONST_ME_SMOKE);
+	registerEnum(CONST_ME_INSECTS);
+	registerEnum(CONST_ME_DRAGONHEAD);
+
+	registerEnum(CONST_ME_ORCSHAMAN);
+	registerEnum(CONST_ME_ORCSHAMAN_FIRE);
+	registerEnum(CONST_ME_THUNDER);
+	registerEnum(CONST_ME_FERUMBRAS);
+	registerEnum(CONST_ME_CONFETTI_HORIZONTAL);
+	registerEnum(CONST_ME_CONFETTI_VERTICAL);
+	registerEnum(CONST_ME_BLACKSMOKE);
+	registerEnum(CONST_ME_REDSMOKE);
+	registerEnum(CONST_ME_YELLOWSMOKE);
+	registerEnum(CONST_ME_GREENSMOKE);
+	registerEnum(CONST_ME_PURPLESMOKE);
+	registerEnum(CONST_ME_EARLY_THUNDER);
+	registerEnum(CONST_ME_RAGIAZ_BONECAPSULE);
+	registerEnum(CONST_ME_CRITICAL_DAMAGE);
+	registerEnum(CONST_ME_PLUNGING_FISH);
+	registerEnum(CONST_ME_BLUE_ENERGY_SPARK);
+	registerEnum(CONST_ME_ORANGE_ENERGY_SPARK);
+	registerEnum(CONST_ME_GREEN_ENERGY_SPARK);
+	registerEnum(CONST_ME_PINK_ENERGY_SPARK);
+	registerEnum(CONST_ME_WHITE_ENERGY_SPARK);
+	registerEnum(CONST_ME_YELLOW_ENERGY_SPARK);
+	registerEnum(CONST_ME_MAGIC_POWDER);
+	registerEnum(CONST_ME_PIXIE_EXPLOSION);
+	registerEnum(CONST_ME_PIXIE_COMING);
+	registerEnum(CONST_ME_PIXIE_GOING);
+	registerEnum(CONST_ME_STORM);
+	registerEnum(CONST_ME_STONE_STORM);
+	registerEnum(CONST_ME_BLUE_GHOST);
+	registerEnum(CONST_ME_PINK_VORTEX);
+	registerEnum(CONST_ME_TREASURE_MAP);
+	registerEnum(CONST_ME_PINK_BEAM);
+	registerEnum(CONST_ME_GREEN_FIREWORKS);
+	registerEnum(CONST_ME_ORANGE_FIREWORKS);
+	registerEnum(CONST_ME_PINK_FIREWORKS);
+	registerEnum(CONST_ME_BLUE_FIREWORKS);
+	registerEnum(CONST_ME_SUPREME_CUBE);
+	registerEnum(CONST_ME_BLACK_BLOOD);
+	registerEnum(CONST_ME_PRISMATIC_SPARK);
+	registerEnum(CONST_ME_THAIAN);
+	registerEnum(CONST_ME_THAIAN_GHOST);
+	registerEnum(CONST_ME_GHOST_SMOKE);
+	registerEnum(CONST_ME_WATER_BLOCK_FLOATING);
+	registerEnum(CONST_ME_WATER_BLOCK);
+	registerEnum(CONST_ME_ROOTS);
+	registerEnum(CONST_ME_GHOSTLY_SCRATCH);
+	registerEnum(CONST_ME_GHOSTLY_BITE);
+	registerEnum(CONST_ME_BIG_SCRATCH);
+	registerEnum(CONST_ME_SLASH);
+	registerEnum(CONST_ME_BITE);
+	registerEnum(CONST_ME_CHIVALRIOUS_CHALLENGE);
+	registerEnum(CONST_ME_DIVINE_DAZZLE);
+	registerEnum(CONST_ME_ELECTRICALSPARK);
+	registerEnum(CONST_ME_PURPLETELEPORT);
+	registerEnum(CONST_ME_REDTELEPORT);
+	registerEnum(CONST_ME_ORANGETELEPORT);
+	registerEnum(CONST_ME_GREYTELEPORT);
+	registerEnum(CONST_ME_LIGHTBLUETELEPORT);
+	registerEnum(CONST_ME_FATAL);
+	registerEnum(CONST_ME_DODGE);
+	registerEnum(CONST_ME_HOURGLASS);
+	registerEnum(CONST_ME_DAZZLING);
+	registerEnum(CONST_ME_SPARKLING);
+	registerEnum(CONST_ME_FERUMBRAS_1);
+	registerEnum(CONST_ME_GAZHARAGOTH);
+	registerEnum(CONST_ME_MAD_MAGE);
+	registerEnum(CONST_ME_HORESTIS);
+	registerEnum(CONST_ME_DEVOVORGA);
+	registerEnum(CONST_ME_FERUMBRAS_2);
+	registerEnum(CONST_ME_WHITE_SMOKE);
+	registerEnum(CONST_ME_WHITE_SMOKES);
+	registerEnum(CONST_ME_WATER_DROP);
+	registerEnum(CONST_ME_AVATAR_APPEAR);
+	registerEnum(CONST_ME_DIVINE_GRENADE);
+	registerEnum(CONST_ME_DIVINE_EMPOWERMENT);
+	registerEnum(CONST_ME_WATER_FLOATING_THRASH);
+	registerEnum(CONST_ME_AGONY);
+	registerEnum(CONST_ME_LOOT_HIGHLIGHT);
+
+	// 13.40
+	registerEnum(CONST_ME_MELTING_CREAM);
+	registerEnum(CONST_ME_REAPER);
+	registerEnum(CONST_ME_POWERFUL_HEARTS);
+	registerEnum(CONST_ME_CREAM);
+	registerEnum(CONST_ME_GENTLE_BUBBLE);
+	registerEnum(CONST_ME_STARBURST);
+	registerEnum(CONST_ME_SIURP);
+	registerEnum(CONST_ME_CACAO);
+	registerEnum(CONST_ME_CANDY_FLOSS);
+
+	// Avatars
+	registerEnum(AVATAR_LOOKTYPE_STEEL);
+	registerEnum(AVATAR_LOOKTYPE_LIGHT);
+	registerEnum(AVATAR_LOOKTYPE_STORM);
+	registerEnum(AVATAR_LOOKTYPE_NATURE);
+	registerEnum(AVATAR_LOOKTYPE_BALANCE);
+
+	// 15.00 effects
+	registerEnum(CONST_ME_GREEN_HITAREA);
+	registerEnum(CONST_ME_RED_HITAREA);
+	registerEnum(CONST_ME_BLUE_HITAREA);
+	registerEnum(CONST_ME_YELLOW_HITAREA);
+	registerEnum(CONST_ME_WHITE_FLURRYOFBLOWS);
+	registerEnum(CONST_ME_GREEN_FLURRYOFBLOWS);
+	registerEnum(CONST_ME_PINK_FLURRYOFBLOWS);
+	registerEnum(CONST_ME_WHITE_ENERGYPULSE);
+	registerEnum(CONST_ME_GREEN_ENERGYPULSE);
+	registerEnum(CONST_ME_PINK_ENERGYPULSE);
+	registerEnum(CONST_ME_WHITE_TIGERCLASH);
+	registerEnum(CONST_ME_GREEN_TIGERCLASH);
+	registerEnum(CONST_ME_PINK_TIGERCLASH);
+	registerEnum(CONST_ME_WHITE_EXPLOSIONHIT);
+	registerEnum(CONST_ME_GREEN_EXPLOSIONHIT);
+	registerEnum(CONST_ME_BLUE_EXPLOSIONHIT);
+	registerEnum(CONST_ME_PINK_EXPLOSIONHIT);
+	registerEnum(CONST_ME_WHITE_ENERGYSHOCK);
+	registerEnum(CONST_ME_GREEN_ENERGYSHOCK);
+	registerEnum(CONST_ME_YELLOW_ENERGYSHOCK);
+
+	registerEnum(CONST_ME_INK_SPLASH);
+	registerEnum(CONST_ME_PAPER_PLANE);
+	registerEnum(CONST_ME_SPIKES);
+	registerEnum(CONST_ME_BLOOD_RAIN);
+	registerEnum(CONST_ME_OPEN_BOOKMACHINE);
+	registerEnum(CONST_ME_OPEN_BOOKSPELL);
+	registerEnum(CONST_ME_SMALL_WHITE_ENERGYSHOCK);
+	registerEnum(CONST_ME_SMALL_GREEN_ENERGYSHOCK);
+	registerEnum(CONST_ME_SMALL_PINK_ENERGYSHOCK);
+	registerEnum(CONST_ME_SMALLWHITE_ENERGY_SPARK);
+	registerEnum(CONST_ME_SMALLGREEN_ENERGY_SPARK);
+	registerEnum(CONST_ME_SMALLPINK_ENERGY_SPARK);
+
+	// 15.12 - Weapon Attack Effects
+	registerEnum(CONST_ME_SWORD_ATTACK);
+	registerEnum(CONST_ME_CLUB_ATTACK);
+	registerEnum(CONST_ME_AXE_ATTACK);
+	registerEnum(CONST_ME_MONK_STAFF_ATTACK);
+	registerEnum(CONST_ME_MONK_DAGGERS_ATTACK);
+	registerEnum(CONST_ME_FIST_ATTACK);
+
+	registerEnum(CONST_ANI_NONE);
+	registerEnum(CONST_ANI_SPEAR);
+	registerEnum(CONST_ANI_BOLT);
+	registerEnum(CONST_ANI_ARROW);
+	registerEnum(CONST_ANI_FIRE);
+	registerEnum(CONST_ANI_ENERGY);
+	registerEnum(CONST_ANI_POISONARROW);
+	registerEnum(CONST_ANI_BURSTARROW);
+	registerEnum(CONST_ANI_THROWINGSTAR);
+	registerEnum(CONST_ANI_THROWINGKNIFE);
+	registerEnum(CONST_ANI_SMALLSTONE);
+	registerEnum(CONST_ANI_DEATH);
+	registerEnum(CONST_ANI_LARGEROCK);
+	registerEnum(CONST_ANI_SNOWBALL);
+	registerEnum(CONST_ANI_POWERBOLT);
+	registerEnum(CONST_ANI_POISON);
+	registerEnum(CONST_ANI_INFERNALBOLT);
+	registerEnum(CONST_ANI_HUNTINGSPEAR);
+	registerEnum(CONST_ANI_ENCHANTEDSPEAR);
+	registerEnum(CONST_ANI_REDSTAR);
+	registerEnum(CONST_ANI_GREENSTAR);
+	registerEnum(CONST_ANI_ROYALSPEAR);
+	registerEnum(CONST_ANI_SNIPERARROW);
+	registerEnum(CONST_ANI_ONYXARROW);
+	registerEnum(CONST_ANI_PIERCINGBOLT);
+	registerEnum(CONST_ANI_WHIRLWINDSWORD);
+	registerEnum(CONST_ANI_WHIRLWINDAXE);
+	registerEnum(CONST_ANI_WHIRLWINDCLUB);
+	registerEnum(CONST_ANI_ETHEREALSPEAR);
+	registerEnum(CONST_ANI_ICE);
+	registerEnum(CONST_ANI_EARTH);
+	registerEnum(CONST_ANI_HOLY);
+	registerEnum(CONST_ANI_SUDDENDEATH);
+	registerEnum(CONST_ANI_FLASHARROW);
+	registerEnum(CONST_ANI_FLAMMINGARROW);
+	registerEnum(CONST_ANI_SHIVERARROW);
+	registerEnum(CONST_ANI_ENERGYBALL);
+	registerEnum(CONST_ANI_SMALLICE);
+	registerEnum(CONST_ANI_SMALLHOLY);
+	registerEnum(CONST_ANI_SMALLEARTH);
+	registerEnum(CONST_ANI_EARTHARROW);
+	registerEnum(CONST_ANI_EXPLOSION);
+	registerEnum(CONST_ANI_CAKE);
+	registerEnum(CONST_ANI_ENVENOMEDARROW);
+	registerEnum(CONST_ANI_GLOOTHSPEAR);
+	registerEnum(CONST_ANI_SIMPLEARROW);
+	registerEnum(CONST_ANI_LEAFSTAR);
+	registerEnum(CONST_ANI_PRISMATICBOLT);
+	registerEnum(CONST_ANI_DRILLBOLT);
+	registerEnum(CONST_ANI_VORTEXBOLT);
+	registerEnum(CONST_ANI_TARSALARROW);
+	registerEnum(CONST_ANI_CRYSTALLINEARROW);
+	registerEnum(CONST_ANI_DIAMONDARROW);
+	registerEnum(CONST_ANI_SPECTRALBOLT);
+	registerEnum(CONST_ANI_ROYALSTAR);
+	registerEnum(CONST_ANI_CANDYCANE);
+	registerEnum(CONST_ANI_CHERRYBOMB);
+	registerEnum(CONST_ANI_SHATTERSTORMARROW);
+	registerEnum(CONST_ANI_FIRESTORMARROW);
+	registerEnum(CONST_ANI_TERRASTORMARROW);
+	registerEnum(CONST_ANI_FROSTSTORMARROW);
+	registerEnum(CONST_ANI_THUNDERSTORMARROW);
+	registerEnum(CONST_ANI_WEAPONTYPE);
+
+	registerEnum(CONST_PROP_BLOCKSOLID);
+	registerEnum(CONST_PROP_HASHEIGHT);
+	registerEnum(CONST_PROP_BLOCKPROJECTILE);
+	registerEnum(CONST_PROP_BLOCKPATH);
+	registerEnum(CONST_PROP_ISVERTICAL);
+	registerEnum(CONST_PROP_ISHORIZONTAL);
+	registerEnum(CONST_PROP_MOVEABLE);
+	registerEnum(CONST_PROP_IMMOVABLEBLOCKSOLID);
+	registerEnum(CONST_PROP_IMMOVABLEBLOCKPATH);
+	registerEnum(CONST_PROP_IMMOVABLENOFIELDBLOCKPATH);
+	registerEnum(CONST_PROP_NOFIELDBLOCKPATH);
+	registerEnum(CONST_PROP_SUPPORTHANGABLE);
+
+	registerEnum(CONST_SLOT_HEAD);
+	registerEnum(CONST_SLOT_NECKLACE);
+	registerEnum(CONST_SLOT_BACKPACK);
+	registerEnum(CONST_SLOT_ARMOR);
+	registerEnum(CONST_SLOT_RIGHT);
+	registerEnum(CONST_SLOT_LEFT);
+	registerEnum(CONST_SLOT_LEGS);
+	registerEnum(CONST_SLOT_FEET);
+	registerEnum(CONST_SLOT_RING);
+	registerEnum(CONST_SLOT_AMMO);
+	registerEnum(CONST_SLOT_STORE_INBOX);
+
+	registerEnum(CREATURE_EVENT_NONE);
+	registerEnum(CREATURE_EVENT_LOGIN);
+	registerEnum(CREATURE_EVENT_LOGOUT);
+	registerEnum(CREATURE_EVENT_RECONNECT);
+	registerEnum(CREATURE_EVENT_THINK);
+	registerEnum(CREATURE_EVENT_PREPAREDEATH);
+	registerEnum(CREATURE_EVENT_DEATH);
+	registerEnum(CREATURE_EVENT_KILL);
+	registerEnum(CREATURE_EVENT_ADVANCE);
+	registerEnum(CREATURE_EVENT_TEXTEDIT);
+	registerEnum(CREATURE_EVENT_HEALTHCHANGE);
+	registerEnum(CREATURE_EVENT_MANACHANGE);
+	registerEnum(CREATURE_EVENT_EXTENDED_OPCODE);
+
+	registerEnum(GAME_STATE_STARTUP);
+	registerEnum(GAME_STATE_INIT);
+	registerEnum(GAME_STATE_NORMAL);
+	registerEnum(GAME_STATE_CLOSED);
+	registerEnum(GAME_STATE_SHUTDOWN);
+	registerEnum(GAME_STATE_CLOSING);
+	registerEnum(GAME_STATE_MAINTAIN);
+
+	registerEnum(MESSAGE_STATUS_CONSOLE_BLUE);
+	registerEnum(MESSAGE_STATUS_CONSOLE_RED);
+	registerEnum(MESSAGE_STATUS_DEFAULT);
+	registerEnum(MESSAGE_STATUS_WARNING);
+	registerEnum(MESSAGE_EVENT_ADVANCE);
+	registerEnum(MESSAGE_STATUS_SMALL);
+	registerEnum(MESSAGE_INFO_DESCR);
+	registerEnum(MESSAGE_EVENT_DEFAULT);
+	registerEnum(MESSAGE_EVENT_ORANGE);
+	registerEnum(MESSAGE_STATUS_CONSOLE_ORANGE);
+
+	registerEnum(CREATURETYPE_PLAYER);
+	registerEnum(CREATURETYPE_MONSTER);
+	registerEnum(CREATURETYPE_NPC);
+	registerEnum(CREATURETYPE_SUMMON_OWN);
+	registerEnum(CREATURETYPE_SUMMON_OTHERS);
+ 
+	registerEnum(FACTION_DEFAULT);
+	registerEnum(FACTION_PLAYER);
+	registerEnum(FACTION_LION);
+	registerEnum(FACTION_LIONUSURPERS);
+	registerEnum(FACTION_MARID);
+	registerEnum(FACTION_EFREET);
+	registerEnum(FACTION_DEEPLING);
+	registerEnum(FACTION_DEATHLING);
+	registerEnum(FACTION_ANUMA);
+	registerEnum(FACTION_FAFNAR);
+
+	registerEnum(CLIENTOS_LINUX);
+	registerEnum(CLIENTOS_WINDOWS);
+	registerEnum(CLIENTOS_FLASH);
+	registerEnum(CLIENTOS_OTCLIENT_LINUX);
+	registerEnum(CLIENTOS_OTCLIENT_WINDOWS);
+	registerEnum(CLIENTOS_OTCLIENT_MAC);
+
+	registerEnum(CLIENTOS_OTCLIENTV8_LINUX);
+	registerEnum(CLIENTOS_OTCLIENTV8_WINDOWS);
+	registerEnum(CLIENTOS_OTCLIENTV8_MAC);
+	registerEnum(CLIENTOS_OTCLIENTV8_ANDROID);
+	registerEnum(CLIENTOS_OTCLIENTV8_IOS);
+	registerEnum(CLIENTOS_OTCLIENTV8_WEB);
+
+	registerEnum(FIGHTMODE_ATTACK);
+	registerEnum(FIGHTMODE_BALANCED);
+	registerEnum(FIGHTMODE_DEFENSE);
+
+	registerEnum(ITEM_ATTRIBUTE_NONE);
+	registerEnum(ITEM_ATTRIBUTE_ACTIONID);
+	registerEnum(ITEM_ATTRIBUTE_UNIQUEID);
+	registerEnum(ITEM_ATTRIBUTE_DESCRIPTION);
+	registerEnum(ITEM_ATTRIBUTE_TEXT);
+	registerEnum(ITEM_ATTRIBUTE_DATE);
+	registerEnum(ITEM_ATTRIBUTE_WRITER);
+	registerEnum(ITEM_ATTRIBUTE_NAME);
+	registerEnum(ITEM_ATTRIBUTE_ARTICLE);
+	registerEnum(ITEM_ATTRIBUTE_PLURALNAME);
+	registerEnum(ITEM_ATTRIBUTE_WEIGHT);
+	registerEnum(ITEM_ATTRIBUTE_ATTACK);
+	registerEnum(ITEM_ATTRIBUTE_DEFENSE);
+	registerEnum(ITEM_ATTRIBUTE_EXTRADEFENSE);
+	registerEnum(ITEM_ATTRIBUTE_ARMOR);
+	registerEnum(ITEM_ATTRIBUTE_HITCHANCE);
+	registerEnum(ITEM_ATTRIBUTE_SHOOTRANGE);
+	registerEnum(ITEM_ATTRIBUTE_OWNER);
+	registerEnum(ITEM_ATTRIBUTE_DURATION);
+	registerEnum(ITEM_ATTRIBUTE_DECAYSTATE);
+	registerEnum(ITEM_ATTRIBUTE_CORPSEOWNER);
+	registerEnum(ITEM_ATTRIBUTE_CHARGES);
+	registerEnum(ITEM_ATTRIBUTE_FLUIDTYPE);
+	registerEnum(ITEM_ATTRIBUTE_DOORID);
+	registerEnum(ITEM_ATTRIBUTE_DURATION_TIMESTAMP);
+	registerEnum(ITEM_ATTRIBUTE_WRAPID);
+	registerEnum(ITEM_ATTRIBUTE_STOREITEM);
+	registerEnum(ITEM_ATTRIBUTE_ATTACK_SPEED);
+	registerEnum(ITEM_ATTRIBUTE_CLASSIFICATION);
+	registerEnum(ITEM_ATTRIBUTE_TIER);
+	registerEnum(ITEM_ATTRIBUTE_CUSTOM);
+	registerEnum(ITEM_ATTRIBUTE_REWARDID);
+	registerEnum(ITEM_ATTRIBUTE_DURATION_MIN);
+	// registerEnum(ITEM_ATTRIBUTE_DURATION_MAX); // Removed due to overflow
+
+	registerEnum(ITEM_TYPE_DEPOT);
+	registerEnum(ITEM_TYPE_MAILBOX);
+	registerEnum(ITEM_TYPE_TRASHHOLDER);
+	registerEnum(ITEM_TYPE_CONTAINER);
+	registerEnum(ITEM_TYPE_DOOR);
+	registerEnum(ITEM_TYPE_MAGICFIELD);
+	registerEnum(ITEM_TYPE_TELEPORT);
+	registerEnum(ITEM_TYPE_BED);
+	registerEnum(ITEM_TYPE_KEY);
+	registerEnum(ITEM_TYPE_RUNE);
+	registerEnum(ITEM_TYPE_CARPET);
+
+	registerEnum(ITEM_GROUP_GROUND);
+	registerEnum(ITEM_GROUP_CONTAINER);
+	registerEnum(ITEM_GROUP_WEAPON);
+	registerEnum(ITEM_GROUP_AMMUNITION);
+	registerEnum(ITEM_GROUP_ARMOR);
+	registerEnum(ITEM_GROUP_CHARGES);
+	registerEnum(ITEM_GROUP_TELEPORT);
+	registerEnum(ITEM_GROUP_MAGICFIELD);
+	registerEnum(ITEM_GROUP_WRITEABLE);
+	registerEnum(ITEM_GROUP_KEY);
+	registerEnum(ITEM_GROUP_SPLASH);
+	registerEnum(ITEM_GROUP_FLUID);
+	registerEnum(ITEM_GROUP_DOOR);
+	registerEnum(ITEM_GROUP_DEPRECATED);
+
+	registerEnum(ITEM_FIREFIELD_PVP_FULL);
+	registerEnum(ITEM_FIREFIELD_PVP_MEDIUM);
+	registerEnum(ITEM_FIREFIELD_PVP_SMALL);
+	registerEnum(ITEM_FIREFIELD_PERSISTENT_FULL);
+	registerEnum(ITEM_FIREFIELD_PERSISTENT_MEDIUM);
+	registerEnum(ITEM_FIREFIELD_PERSISTENT_SMALL);
+	registerEnum(ITEM_FIREFIELD_NOPVP);
+
+	registerEnum(ITEM_POISONFIELD_PVP);
+	registerEnum(ITEM_POISONFIELD_PERSISTENT);
+	registerEnum(ITEM_POISONFIELD_NOPVP);
+
+	registerEnum(ITEM_ENERGYFIELD_PVP);
+	registerEnum(ITEM_ENERGYFIELD_PERSISTENT);
+	registerEnum(ITEM_ENERGYFIELD_NOPVP);
+
+	registerEnum(ITEM_MAGICWALL);
+	registerEnum(ITEM_MAGICWALL_PERSISTENT);
+	registerEnum(ITEM_MAGICWALL_SAFE);
+	registerEnum(ITEM_MAGICWALL_NOPVP);
+
+	registerEnum(ITEM_WILDGROWTH);
+	registerEnum(ITEM_WILDGROWTH_PERSISTENT);
+	registerEnum(ITEM_WILDGROWTH_SAFE);
+	registerEnum(ITEM_WILDGROWTH_NOPVP);
+
+	registerEnum(ITEM_BAG);
+	registerEnum(ITEM_BACKPACK);
+	registerEnum(ITEM_GOLD_COIN);
+	registerEnum(ITEM_PLATINUM_COIN);
+	registerEnum(ITEM_CRYSTAL_COIN);
+	registerEnum(ITEM_GOLD_NUGGET);
+
+	registerEnum(ITEM_DEPOT);
+	registerEnum(ITEM_LOCKER);
+	registerEnum(ITEM_INBOX);
+	registerEnum(ITEM_MARKET);
+	registerEnum(ITEM_STORE_INBOX);
+	registerEnum(ITEM_DECORATION_KIT);
+	registerEnum(ITEM_SUPPLY_STASH);
+	registerEnum(ITEM_DEPOT_BOX_1);
+
+	// Registration is not required. It uses a table.
+	// registerEnum(ITEM_DEPOT_BOX_17);
+
+	registerEnum(ITEM_MALE_CORPSE);
+	registerEnum(ITEM_FEMALE_CORPSE);
+
+	registerEnum(ITEM_FULLSPLASH);
+	registerEnum(ITEM_SMALLSPLASH);
+
+	registerEnum(ITEM_PARCEL);
+	registerEnum(ITEM_LETTER);
+	registerEnum(ITEM_LETTER_STAMPED);
+	registerEnum(ITEM_LABEL);
+
+	registerEnum(ITEM_AMULETOFLOSS);
+
+	registerEnum(ITEM_REWARD_CHEST);
+	registerEnum(ITEM_REWARD_CONTAINER);
+
+	registerEnum(ITEM_GOLD_POUCH);
+
+	registerEnum(ITEM_DOCUMENT_RO);
+	registerEnum(ITEM_RECEIPT_SUCCESS);
+	registerEnum(ITEM_RECEIPT_FAIL);
+
+	registerEnum(WIELDINFO_NONE);
+	registerEnum(WIELDINFO_LEVEL);
+	registerEnum(WIELDINFO_MAGLV);
+	registerEnum(WIELDINFO_VOCREQ);
+	registerEnum(WIELDINFO_PREMIUM);
+	registerEnum(WIELDINFO_RESETS);
+
+	registerEnum(PlayerFlag_CannotUseCombat);
+	registerEnum(PlayerFlag_CannotAttackPlayer);
+	registerEnum(PlayerFlag_CannotAttackMonster);
+	registerEnum(PlayerFlag_CannotBeAttacked);
+	registerEnum(PlayerFlag_CanConvinceAll);
+	registerEnum(PlayerFlag_CanSummonAll);
+	registerEnum(PlayerFlag_CanIllusionAll);
+	registerEnum(PlayerFlag_CanSenseInvisibility);
+	registerEnum(PlayerFlag_IgnoredByMonsters);
+	registerEnum(PlayerFlag_NotGainInFight);
+	registerEnum(PlayerFlag_HasInfiniteMana);
+	registerEnum(PlayerFlag_HasInfiniteSoul);
+	registerEnum(PlayerFlag_HasNoExhaustion);
+	registerEnum(PlayerFlag_CannotUseSpells);
+	registerEnum(PlayerFlag_CannotPickupItem);
+	registerEnum(PlayerFlag_CanAlwaysLogin);
+	registerEnum(PlayerFlag_CanBroadcast);
+	registerEnum(PlayerFlag_CanEditHouses);
+	registerEnum(PlayerFlag_CannotBeBanned);
+	registerEnum(PlayerFlag_CannotBePushed);
+	registerEnum(PlayerFlag_HasInfiniteCapacity);
+	registerEnum(PlayerFlag_CanPushAllCreatures);
+	registerEnum(PlayerFlag_CanTalkRedPrivate);
+	registerEnum(PlayerFlag_CanTalkRedChannel);
+	registerEnum(PlayerFlag_TalkOrangeHelpChannel);
+	registerEnum(PlayerFlag_NotGainExperience);
+	registerEnum(PlayerFlag_NotGainMana);
+	registerEnum(PlayerFlag_NotGainHealth);
+	registerEnum(PlayerFlag_NotGainSkill);
+	registerEnum(PlayerFlag_SetMaxSpeed);
+	registerEnum(PlayerFlag_SpecialVIP);
+	registerEnum(PlayerFlag_NotGenerateLoot);
+	registerEnum(PlayerFlag_IgnoreProtectionZone);
+	registerEnum(PlayerFlag_IgnoreSpellCheck);
+	registerEnum(PlayerFlag_IgnoreWeaponCheck);
+	registerEnum(PlayerFlag_CannotBeMuted);
+	registerEnum(PlayerFlag_IsAlwaysPremium);
+	registerEnum(PlayerFlag_IgnoreYellCheck);
+	registerEnum(PlayerFlag_IgnoreSendPrivateCheck);
+	registerEnum(PlayerFlag_CanThrowFar);
+
+	registerEnum(PLAYERSEX_FEMALE);
+	registerEnum(PLAYERSEX_MALE);
+
+	registerEnum(REPORT_REASON_NAMEINAPPROPRIATE);
+	registerEnum(REPORT_REASON_NAMEPOORFORMATTED);
+	registerEnum(REPORT_REASON_NAMEADVERTISING);
+	registerEnum(REPORT_REASON_NAMEUNFITTING);
+	registerEnum(REPORT_REASON_NAMERULEVIOLATION);
+	registerEnum(REPORT_REASON_INSULTINGSTATEMENT);
+	registerEnum(REPORT_REASON_SPAMMING);
+	registerEnum(REPORT_REASON_ADVERTISINGSTATEMENT);
+	registerEnum(REPORT_REASON_UNFITTINGSTATEMENT);
+	registerEnum(REPORT_REASON_LANGUAGESTATEMENT);
+	registerEnum(REPORT_REASON_DISCLOSURE);
+	registerEnum(REPORT_REASON_RULEVIOLATION);
+	registerEnum(REPORT_REASON_STATEMENT_BUGABUSE);
+	registerEnum(REPORT_REASON_UNOFFICIALSOFTWARE);
+	registerEnum(REPORT_REASON_PRETENDING);
+	registerEnum(REPORT_REASON_HARASSINGOWNERS);
+	registerEnum(REPORT_REASON_FALSEINFO);
+	registerEnum(REPORT_REASON_ACCOUNTSHARING);
+	registerEnum(REPORT_REASON_STEALINGDATA);
+	registerEnum(REPORT_REASON_SERVICEATTACKING);
+	registerEnum(REPORT_REASON_SERVICEAGREEMENT);
+
+	registerEnum(REPORT_TYPE_NAME);
+	registerEnum(REPORT_TYPE_STATEMENT);
+	registerEnum(REPORT_TYPE_BOT);
+
+	registerEnum(VOCATION_NONE);
+	registerEnum(VOCATION_SORCERER);
+	registerEnum(VOCATION_DRUID);
+	registerEnum(VOCATION_PALADIN);
+	registerEnum(VOCATION_KNIGHT);
+	registerEnum(VOCATION_MONK);
+
+	registerEnum(SKILL_FIST);
+	registerEnum(SKILL_CLUB);
+	registerEnum(SKILL_SWORD);
+	registerEnum(SKILL_AXE);
+	registerEnum(SKILL_DISTANCE);
+	registerEnum(SKILL_SHIELD);
+	registerEnum(SKILL_FISHING);
+	registerEnum(SKILL_MAGLEVEL);
+	registerEnum(SKILL_LEVEL);
+
+	registerEnum(SPECIALSKILL_CRITICALHITCHANCE);
+	registerEnum(SPECIALSKILL_CRITICALHITAMOUNT);
+	registerEnum(SPECIALSKILL_LIFELEECHCHANCE);
+	registerEnum(SPECIALSKILL_LIFELEECHAMOUNT);
+	registerEnum(SPECIALSKILL_MANALEECHCHANCE);
+	registerEnum(SPECIALSKILL_MANALEECHAMOUNT);
+
+	registerEnum(STAT_MAXHITPOINTS);
+	registerEnum(STAT_MAXMANAPOINTS);
+	registerEnum(STAT_SOULPOINTS);
+	registerEnum(STAT_MAGICPOINTS);
+	registerEnum(STAT_CAPACITY);
+
+	registerEnum(SKULL_NONE);
+	registerEnum(SKULL_YELLOW);
+	registerEnum(SKULL_GREEN);
+	registerEnum(SKULL_WHITE);
+	registerEnum(SKULL_RED);
+	registerEnum(SKULL_BLACK);
+
+	registerEnum(FORGE_DUST_STORAGE);
+	registerEnum(FORGE_DUST_LIMIT_STORAGE);
+
+	registerEnum(FLUID_NONE);
+	registerEnum(FLUID_WATER);
+	registerEnum(FLUID_BLOOD);
+	registerEnum(FLUID_BEER);
+	registerEnum(FLUID_SLIME);
+	registerEnum(FLUID_LEMONADE);
+	registerEnum(FLUID_MILK);
+	registerEnum(FLUID_MANA);
+	registerEnum(FLUID_LIFE);
+	registerEnum(FLUID_OIL);
+	registerEnum(FLUID_URINE);
+	registerEnum(FLUID_COCONUTMILK);
+	registerEnum(FLUID_WINE);
+	registerEnum(FLUID_MUD);
+	registerEnum(FLUID_FRUITJUICE);
+	registerEnum(FLUID_LAVA);
+	registerEnum(FLUID_RUM);
+	registerEnum(FLUID_SWAMP);
+	registerEnum(FLUID_TEA);
+	registerEnum(FLUID_MEAD);
+
+	registerEnum(GUILDEMBLEM_NONE);
+	registerEnum(GUILDEMBLEM_ALLY);
+	registerEnum(GUILDEMBLEM_ENEMY);
+	registerEnum(GUILDEMBLEM_NEUTRAL);
+	registerEnum(GUILDEMBLEM_MEMBER);
+	registerEnum(GUILDEMBLEM_OTHER);
+
+	registerEnum(SPEECHBUBBLE_NONE);
+	registerEnum(SPEECHBUBBLE_NORMAL);
+	registerEnum(SPEECHBUBBLE_TRADE);
+	registerEnum(SPEECHBUBBLE_QUEST);
+	registerEnum(SPEECHBUBBLE_QUESTTRADER);
+	registerEnum(SPEECHBUBBLE_HIRELING);
+
+	registerEnum(TALKTYPE_SAY);
+	registerEnum(TALKTYPE_WHISPER);
+	registerEnum(TALKTYPE_YELL);
+	registerEnum(TALKTYPE_CHANNEL_Y);
+	registerEnum(TALKTYPE_CHANNEL_O);
+	registerEnum(TALKTYPE_PRIVATE_NP);
+	registerEnum(TALKTYPE_PRIVATE_PN);
+	registerEnum(TALKTYPE_BROADCAST);
+	registerEnum(TALKTYPE_CHANNEL_R1);
+	registerEnum(TALKTYPE_MONSTER_SAY);
+	registerEnum(TALKTYPE_MONSTER_YELL);
+
+	registerEnum(TEXTCOLOR_BLUE);
+	registerEnum(TEXTCOLOR_GREEN);
+	registerEnum(TEXTCOLOR_LIGHTGREEN);
+	registerEnum(TEXTCOLOR_LIGHTBLUE);
+	registerEnum(TEXTCOLOR_MAYABLUE);
+	registerEnum(TEXTCOLOR_DARKRED);
+	registerEnum(TEXTCOLOR_DARKPURPLE);
+	registerEnum(TEXTCOLOR_TEAL);
+	registerEnum(TEXTCOLOR_PURPLE);
+	registerEnum(TEXTCOLOR_DARKORANGE);
+	registerEnum(TEXTCOLOR_LIGHTORANGE);
+	registerEnum(TEXTCOLOR_RED);
+	registerEnum(TEXTCOLOR_PINK);
+	registerEnum(TEXTCOLOR_ORANGE);
+	registerEnum(TEXTCOLOR_DARKYELLOW);
+	registerEnum(TEXTCOLOR_YELLOW);
+	registerEnum(TEXTCOLOR_WHITE);
+	registerEnum(TEXTCOLOR_NONE);
+	registerGlobalVariable("TEXTCOLOR_GOLD", TEXTCOLOR_DARKYELLOW);
+
+	registerEnum(TILESTATE_NONE);
+	registerEnum(TILESTATE_PROTECTIONZONE);
+	registerEnum(TILESTATE_NOPVPZONE);
+	registerEnum(TILESTATE_NOLOGOUT);
+	registerEnum(TILESTATE_PVPZONE);
+	registerEnum(TILESTATE_FLOORCHANGE);
+	registerEnum(TILESTATE_FLOORCHANGE_DOWN);
+	registerEnum(TILESTATE_FLOORCHANGE_NORTH);
+	registerEnum(TILESTATE_FLOORCHANGE_SOUTH);
+	registerEnum(TILESTATE_FLOORCHANGE_EAST);
+	registerEnum(TILESTATE_FLOORCHANGE_WEST);
+	registerEnum(TILESTATE_TELEPORT);
+	registerEnum(TILESTATE_MAGICFIELD);
+	registerEnum(TILESTATE_MAILBOX);
+	registerEnum(TILESTATE_TRASHHOLDER);
+	registerEnum(TILESTATE_BED);
+	registerEnum(TILESTATE_DEPOT);
+	registerEnum(TILESTATE_BLOCKSOLID);
+	registerEnum(TILESTATE_BLOCKPATH);
+	registerEnum(TILESTATE_IMMOVABLEBLOCKSOLID);
+	registerEnum(TILESTATE_IMMOVABLEBLOCKPATH);
+	registerEnum(TILESTATE_IMMOVABLENOFIELDBLOCKPATH);
+	registerEnum(TILESTATE_NOFIELDBLOCKPATH);
+	registerEnum(TILESTATE_FLOORCHANGE_SOUTH_ALT);
+	registerEnum(TILESTATE_FLOORCHANGE_EAST_ALT);
+	registerEnum(TILESTATE_SUPPORTS_HANGABLE);
+
+	registerEnum(WEAPON_NONE);
+	registerEnum(WEAPON_SWORD);
+	registerEnum(WEAPON_CLUB);
+	registerEnum(WEAPON_AXE);
+	registerEnum(WEAPON_SHIELD);
+	registerEnum(WEAPON_DISTANCE);
+	registerEnum(WEAPON_WAND);
+	registerEnum(WEAPON_AMMO);
+	registerEnum(WEAPON_QUIVER);
+	registerEnum(WEAPON_FIST);
+
+	registerEnum(WORLD_TYPE_NO_PVP);
+	registerEnum(WORLD_TYPE_PVP);
+	registerEnum(WORLD_TYPE_PVP_ENFORCED);
+
+	// Use with container:addItem, container:addItemEx and possibly other functions.
+	registerEnum(FLAG_NOLIMIT);
+	registerEnum(FLAG_IGNOREBLOCKITEM);
+	registerEnum(FLAG_IGNOREBLOCKCREATURE);
+	registerEnum(FLAG_CHILDISOWNER);
+	registerEnum(FLAG_PATHFINDING);
+	registerEnum(FLAG_IGNOREFIELDDAMAGE);
+	registerEnum(FLAG_IGNORENOTMOVEABLE);
+	registerEnum(FLAG_IGNOREAUTOSTACK);
+
+	// Use with itemType:getSlotPosition
+	registerEnum(SLOTP_WHEREEVER);
+	registerEnum(SLOTP_HEAD);
+	registerEnum(SLOTP_NECKLACE);
+	registerEnum(SLOTP_BACKPACK);
+	registerEnum(SLOTP_ARMOR);
+	registerEnum(SLOTP_RIGHT);
+	registerEnum(SLOTP_LEFT);
+	registerEnum(SLOTP_LEGS);
+	registerEnum(SLOTP_FEET);
+	registerEnum(SLOTP_RING);
+	registerEnum(SLOTP_AMMO);
+	registerEnum(SLOTP_DEPOT);
+	registerEnum(SLOTP_TWO_HAND);
+
+	// Use with combat functions
+	registerEnum(ORIGIN_NONE);
+	registerEnum(ORIGIN_CONDITION);
+	registerEnum(ORIGIN_SPELL);
+	registerEnum(ORIGIN_MELEE);
+	registerEnum(ORIGIN_RANGED);
+	registerEnum(ORIGIN_WAND);
+
+	// Use with house:getAccessList, house:setAccessList
+	registerEnum(GUEST_LIST);
+	registerEnum(SUBOWNER_LIST);
+	// Use with house:getType
+	registerEnum(HOUSE_TYPE_NORMAL);
+	registerEnum(HOUSE_TYPE_GUILDHALL);
+
+	// Use with player:getGuildLevel
+	registerEnum(GUILDLEVEL_MEMBER);
+	registerEnum(GUILDLEVEL_VICE);
+	registerEnum(GUILDLEVEL_LEADER);
+
+
+	// Use with player:addMapMark
+	registerEnum(MAPMARK_TICK);
+	registerEnum(MAPMARK_QUESTION);
+	registerEnum(MAPMARK_EXCLAMATION);
+	registerEnum(MAPMARK_STAR);
+	registerEnum(MAPMARK_CROSS);
+	registerEnum(MAPMARK_TEMPLE);
+	registerEnum(MAPMARK_KISS);
+	registerEnum(MAPMARK_SHOVEL);
+	registerEnum(MAPMARK_SWORD);
+	registerEnum(MAPMARK_FLAG);
+	registerEnum(MAPMARK_LOCK);
+	registerEnum(MAPMARK_BAG);
+	registerEnum(MAPMARK_SKULL);
+	registerEnum(MAPMARK_DOLLAR);
+	registerEnum(MAPMARK_REDNORTH);
+	registerEnum(MAPMARK_REDSOUTH);
+	registerEnum(MAPMARK_REDEAST);
+	registerEnum(MAPMARK_REDWEST);
+	registerEnum(MAPMARK_GREENNORTH);
+	registerEnum(MAPMARK_GREENSOUTH);
+
+	// Use with Game.getReturnMessage
+	registerEnum(RETURNVALUE_NOERROR);
+	registerEnum(RETURNVALUE_NOTPOSSIBLE);
+	registerEnum(RETURNVALUE_NOTENOUGHROOM);
+	registerEnum(RETURNVALUE_PLAYERISPZLOCKED);
+	registerEnum(RETURNVALUE_PLAYERISNOTINVITED);
+	registerEnum(RETURNVALUE_ONLYGUILDMEMBERSMAYENTER);
+	registerEnum(RETURNVALUE_CANNOTTHROW);
+	registerEnum(RETURNVALUE_THEREISNOWAY);
+	registerEnum(RETURNVALUE_DESTINATIONOUTOFREACH);
+	registerEnum(RETURNVALUE_CREATUREBLOCK);
+	registerEnum(RETURNVALUE_NOTMOVEABLE);
+	registerEnum(RETURNVALUE_DROPTWOHANDEDITEM);
+	registerEnum(RETURNVALUE_BOTHHANDSNEEDTOBEFREE);
+	registerEnum(RETURNVALUE_CANONLYUSEONEWEAPON);
+	registerEnum(RETURNVALUE_NEEDEXCHANGE);
+	registerEnum(RETURNVALUE_CANNOTBEDRESSED);
+	registerEnum(RETURNVALUE_PUTTHISOBJECTINYOURHAND);
+	registerEnum(RETURNVALUE_PUTTHISOBJECTINBOTHHANDS);
+	registerEnum(RETURNVALUE_TOOFARAWAY);
+	registerEnum(RETURNVALUE_FIRSTGODOWNSTAIRS);
+	registerEnum(RETURNVALUE_FIRSTGOUPSTAIRS);
+	registerEnum(RETURNVALUE_CONTAINERNOTENOUGHROOM);
+	registerEnum(RETURNVALUE_NOTENOUGHCAPACITY);
+	registerEnum(RETURNVALUE_CANNOTPICKUP);
+	registerEnum(RETURNVALUE_THISISIMPOSSIBLE);
+	registerEnum(RETURNVALUE_DEPOTISFULL);
+	registerEnum(RETURNVALUE_CREATUREDOESNOTEXIST);
+	registerEnum(RETURNVALUE_CANNOTUSETHISOBJECT);
+	registerEnum(RETURNVALUE_PLAYERWITHTHISNAMEISNOTONLINE);
+	registerEnum(RETURNVALUE_NOTREQUIREDLEVELTOUSERUNE);
+	registerEnum(RETURNVALUE_YOUAREALREADYTRADING);
+	registerEnum(RETURNVALUE_THISPLAYERISALREADYTRADING);
+	registerEnum(RETURNVALUE_YOUMAYNOTLOGOUTDURINGAFIGHT);
+	registerEnum(RETURNVALUE_DIRECTPLAYERSHOOT);
+	registerEnum(RETURNVALUE_NOTENOUGHLEVEL);
+	registerEnum(RETURNVALUE_NOTENOUGHMAGICLEVEL);
+	registerEnum(RETURNVALUE_NOTENOUGHMANA);
+	registerEnum(RETURNVALUE_NOTENOUGHSOUL);
+	registerEnum(RETURNVALUE_YOUAREEXHAUSTED);
+	registerEnum(RETURNVALUE_YOUCANNOTUSEOBJECTSTHATFAST);
+	registerEnum(RETURNVALUE_PLAYERISNOTREACHABLE);
+	registerEnum(RETURNVALUE_CANONLYUSETHISRUNEONCREATURES);
+	registerEnum(RETURNVALUE_ACTIONNOTPERMITTEDINPROTECTIONZONE);
+	registerEnum(RETURNVALUE_YOUMAYNOTATTACKTHISPLAYER);
+	registerEnum(RETURNVALUE_YOUMAYNOTATTACKAPERSONINPROTECTIONZONE);
+	registerEnum(RETURNVALUE_YOUMAYNOTATTACKAPERSONWHILEINPROTECTIONZONE);
+	registerEnum(RETURNVALUE_YOUMAYNOTATTACKTHISCREATURE);
+	registerEnum(RETURNVALUE_YOUCANONLYUSEITONCREATURES);
+	registerEnum(RETURNVALUE_CREATUREISNOTREACHABLE);
+	registerEnum(RETURNVALUE_TURNSECUREMODETOATTACKUNMARKEDPLAYERS);
+	registerEnum(RETURNVALUE_YOUNEEDPREMIUMACCOUNT);
+	registerEnum(RETURNVALUE_YOUNEEDTOLEARNTHISSPELL);
+	registerEnum(RETURNVALUE_YOURVOCATIONCANNOTUSETHISSPELL);
+	registerEnum(RETURNVALUE_YOUNEEDAWEAPONTOUSETHISSPELL);
+	registerEnum(RETURNVALUE_PLAYERISPZLOCKEDLEAVEPVPZONE);
+	registerEnum(RETURNVALUE_PLAYERISPZLOCKEDENTERPVPZONE);
+	registerEnum(RETURNVALUE_ACTIONNOTPERMITTEDINANOPVPZONE);
+	registerEnum(RETURNVALUE_YOUCANNOTLOGOUTHERE);
+	registerEnum(RETURNVALUE_YOUNEEDAMAGICITEMTOCASTSPELL);
+	registerEnum(RETURNVALUE_NAMEISTOOAMBIGUOUS);
+	registerEnum(RETURNVALUE_CANONLYUSEONESHIELD);
+	registerEnum(RETURNVALUE_NOPARTYMEMBERSINRANGE);
+	registerEnum(RETURNVALUE_YOUARENOTTHEOWNER);
+	registerEnum(RETURNVALUE_TRADEPLAYERFARAWAY);
+	registerEnum(RETURNVALUE_YOUDONTOWNTHISHOUSE);
+	registerEnum(RETURNVALUE_TRADEPLAYERALREADYOWNSAHOUSE);
+	registerEnum(RETURNVALUE_TRADEPLAYERHIGHESTBIDDER);
+	registerEnum(RETURNVALUE_YOUCANNOTTRADETHISHOUSE);
+	registerEnum(RETURNVALUE_YOUDONTHAVEREQUIREDPROFESSION);
+	registerEnum(RETURNVALUE_CANNOTMOVEITEMISNOTSTOREITEM);
+	registerEnum(RETURNVALUE_ITEMCANNOTBEMOVEDTHERE);
+	registerEnum(RETURNVALUE_YOUCANNOTUSETHISBED);
+	registerEnum(RETURNVALUE_TRADEPLAYERNOTINAGUILD);
+	registerEnum(RETURNVALUE_TRADEGUILDALREADYOWNSAHOUSE);
+	registerEnum(RETURNVALUE_TRADEPLAYERNOTGUILDLEADER);
+	registerEnum(RETURNVALUE_YOUARENOTGUILDLEADER);
+
+	registerEnum(RELOAD_TYPE_ALL);
+	registerEnum(RELOAD_TYPE_ACTIONS);
+	registerEnum(RELOAD_TYPE_CHAT);
+	registerEnum(RELOAD_TYPE_CONFIG);
+	registerEnum(RELOAD_TYPE_CREATURESCRIPTS);
+	registerEnum(RELOAD_TYPE_EVENTS);
+	registerEnum(RELOAD_TYPE_GLOBAL);
+	registerEnum(RELOAD_TYPE_GLOBALEVENTS);
+	registerEnum(RELOAD_TYPE_ITEMS);
+	registerEnum(RELOAD_TYPE_MONSTERS);
+	registerEnum(RELOAD_TYPE_OUTFITS);
+	registerEnum(RELOAD_TYPE_MOUNTS);
+	registerEnum(RELOAD_TYPE_MOVEMENTS);
+	registerEnum(RELOAD_TYPE_NPCS);
+	registerEnum(RELOAD_TYPE_QUESTS);
+	registerEnum(RELOAD_TYPE_RAIDS);
+	registerEnum(RELOAD_TYPE_SCRIPTS);
+	registerEnum(RELOAD_TYPE_SPELLS);
+	registerEnum(RELOAD_TYPE_TALKACTIONS);
+	registerEnum(RELOAD_TYPE_WEAPONS);
+
+	registerEnum(ZONE_PROTECTION);
+	registerEnum(ZONE_NOPVP);
+	registerEnum(ZONE_PVP);
+	registerEnum(ZONE_NOLOGOUT);
+	registerEnum(ZONE_NORMAL);
+
+	registerEnum(MAX_LOOTCHANCE);
+
+	registerEnum(SPELL_INSTANT);
+	registerEnum(SPELL_RUNE);
+
+	registerEnum(MONSTERS_EVENT_THINK);
+	registerEnum(MONSTERS_EVENT_APPEAR);
+	registerEnum(MONSTERS_EVENT_DISAPPEAR);
+	registerEnum(MONSTERS_EVENT_MOVE);
+	registerEnum(MONSTERS_EVENT_SAY);
+
+	registerEnum(DECAYING_FALSE);
+	registerEnum(DECAYING_TRUE);
+	registerEnum(DECAYING_PENDING);
+
+	registerEnum(VARIANT_NUMBER);
+	registerEnum(VARIANT_POSITION);
+	registerEnum(VARIANT_TARGETPOSITION);
+	registerEnum(VARIANT_STRING);
+
+	registerEnum(SPELLGROUP_NONE);
+	registerEnum(SPELLGROUP_ATTACK);
+	registerEnum(SPELLGROUP_HEALING);
+	registerEnum(SPELLGROUP_SUPPORT);
+	registerEnum(SPELLGROUP_SPECIAL);
+	registerEnum(SPELLGROUP_FOCUS);
+	registerEnum(SPELLGROUP_STANCE);
+
+	registerEnum(STANCE_NONE);
+	registerEnum(STANCE_PROTECTOR);
+	registerEnum(STANCE_BLOOD_RAGE);
+	registerEnum(STANCE_DIVINE_DEFIANCE);
+	registerEnum(STANCE_SHARPSHOOTER);
+	registerEnum(STANCE_EXPOSE_WEAKNESS);
+	registerEnum(STANCE_SAP_STRENGTH);
+	registerEnum(STANCE_MASTER_OF_FLAMES);
+	registerEnum(STANCE_MASTER_OF_THUNDER);
+	registerEnum(STANCE_MASTER_OF_DECAY);
+	registerEnum(STANCE_SHARED_CONSERVATION);
+	registerEnum(STANCE_ELEMENTAL_SYNTHESIS);
+
+	registerEnum(AttrSubId_None);
+	registerEnum(AttrSubId_TrainParty);
+	registerEnum(AttrSubId_ProtectParty);
+	registerEnum(AttrSubId_EnchantParty);
+	registerEnum(AttrSubId_JeanPierreMagic);
+	registerEnum(AttrSubId_JeanPierreMelee);
+	registerEnum(AttrSubId_JeanPierreDistance);
+	registerEnum(AttrSubId_JeanPierreDefense);
+	registerEnum(AttrSubId_JeanPierreFishing);
+	registerEnum(AttrSubId_BloodRageProtector);
+	registerEnum(AttrSubId_Sharpshooter);
+	registerEnum(AttrSubId_SwiftFoot);
+	registerEnum(AttrSubId_DivineDefiance);
+	registerEnum(AttrSubId_SorcererMasterOfFlames);
+	registerEnum(AttrSubId_SorcererMasterOfThunder);
+	registerEnum(AttrSubId_SorcererMasterOfDecay);
+	registerEnum(AttrSubId_DruidSharedConservation);
+	registerEnum(AttrSubId_DruidElementalSynthesis);
+	registerEnum(AttrSubId_SorcererSapStrengthAura);
+	registerEnum(AttrSubId_SorcererExposeWeaknessAura);
+
+	registerEnum(SCREENSHOT_AND_BANNER_TYPE_NONE);
+	registerEnum(SCREENSHOT_AND_BANNER_TYPE_BANNER_INFO);
+
+	registerEnum(BANNER_TYPE_NONE);
+	registerEnum(BANNER_TYPE_BOSSDEFEATED);
+	registerEnum(BANNER_TYPE_DEATHPVE);
+	registerEnum(BANNER_TYPE_DEATHPVP);
+	registerEnum(BANNER_TYPE_PLAYERKILLASSIST);
+	registerEnum(BANNER_TYPE_PLAYERKILL);
+	registerEnum(BANNER_TYPE_PLAYERATTACKING);
+	registerEnum(BANNER_TYPE_TREASUREFOUND);
+	registerEnum(BANNER_TYPE_GIFTOFLIFE);
+	registerEnum(BANNER_TYPE_ATTACKSTOPPED);
+	registerEnum(BANNER_TYPE_CAPACITYLIMIT);
+	registerEnum(BANNER_TYPE_OUTOFAMMO);
+	registerEnum(BANNER_TYPE_TARGETTOOCLOSE);
+	registerEnum(BANNER_TYPE_OUTOFSOULPOINTS);
+	registerEnum(BANNER_TYPE_TUTORIALCOMPLETE);
+	registerEnum(BANNER_TYPE_PROMOTION_GRANTED);
+
+	// Imbuements
+	registerEnum(IMBUEMENT_TYPE_NONE);
+	registerEnum(IMBUEMENT_TYPE_FIRE_DAMAGE);
+	registerEnum(IMBUEMENT_TYPE_EARTH_DAMAGE);
+	registerEnum(IMBUEMENT_TYPE_ICE_DAMAGE);
+	registerEnum(IMBUEMENT_TYPE_ENERGY_DAMAGE);
+	registerEnum(IMBUEMENT_TYPE_DEATH_DAMAGE);
+	registerEnum(IMBUEMENT_TYPE_HOLY_DAMAGE);
+	registerEnum(IMBUEMENT_TYPE_LIFE_LEECH);
+	registerEnum(IMBUEMENT_TYPE_MANA_LEECH);
+	registerEnum(IMBUEMENT_TYPE_CRITICAL_CHANCE);
+	registerEnum(IMBUEMENT_TYPE_CRITICAL_AMOUNT);
+	registerEnum(IMBUEMENT_TYPE_FIRE_RESIST);
+	registerEnum(IMBUEMENT_TYPE_EARTH_RESIST);
+	registerEnum(IMBUEMENT_TYPE_ICE_RESIST);
+	registerEnum(IMBUEMENT_TYPE_ENERGY_RESIST);
+	registerEnum(IMBUEMENT_TYPE_HOLY_RESIST);
+	registerEnum(IMBUEMENT_TYPE_DEATH_RESIST);
+	registerEnum(IMBUEMENT_TYPE_PARALYSIS_DEFLECTION);
+	registerEnum(IMBUEMENT_TYPE_SPEED_BOOST);
+	registerEnum(IMBUEMENT_TYPE_CAPACITY_BOOST);
+	registerEnum(IMBUEMENT_TYPE_FIST_SKILL);
+	registerEnum(IMBUEMENT_TYPE_AXE_SKILL);
+	registerEnum(IMBUEMENT_TYPE_SWORD_SKILL);
+	registerEnum(IMBUEMENT_TYPE_CLUB_SKILL);
+	registerEnum(IMBUEMENT_TYPE_DISTANCE_SKILL);
+	registerEnum(IMBUEMENT_TYPE_FISHING_SKILL);
+	registerEnum(IMBUEMENT_TYPE_SHIELD_SKILL);
+	registerEnum(IMBUEMENT_TYPE_MAGIC_LEVEL);
+	registerEnum(IMBUEMENT_TYPE_LAST);
+
+	registerEnum(IMBUEMENT_DECAY_NONE);
+	registerEnum(IMBUEMENT_DECAY_EQUIPPED);
+	registerEnum(IMBUEMENT_DECAY_INFIGHT);
+	registerEnum(IMBUEMENT_DECAY_LAST);
+
+	// _G
+	registerGlobalVariable("INDEX_WHEREEVER", INDEX_WHEREEVER);
+	registerGlobalBoolean("VIRTUAL_PARENT", true);
+
+	registerGlobalMethod("isType", LuaScriptInterface::luaIsType);
+	registerGlobalMethod("rawgetmetatable", LuaScriptInterface::luaRawGetMetatable);
+	registerGlobalMethod("setMonsterLevelSkullRange", luaSetMonsterLevelSkullRange);
+	registerGlobalMethod("setMonsterLevelBonus", luaSetMonsterLevelBonus);
+
+	// configKeys
+	registerTable("configKeys");
+
+	registerEnumIn("configKeys", ConfigManager::ALLOW_CHANGEOUTFIT);
+	registerEnumIn("configKeys", ConfigManager::ONE_PLAYER_ON_ACCOUNT);
+	registerEnumIn("configKeys", ConfigManager::AIMBOT_HOTKEY_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::REMOVE_RUNE_CHARGES);
+	registerEnumIn("configKeys", ConfigManager::REMOVE_WEAPON_AMMO);
+	registerEnumIn("configKeys", ConfigManager::REMOVE_WEAPON_CHARGES);
+	registerEnumIn("configKeys", ConfigManager::REMOVE_POTION_CHARGES);
+	registerEnumIn("configKeys", ConfigManager::EXPERIENCE_FROM_PLAYERS);
+	registerEnumIn("configKeys", ConfigManager::FREE_PREMIUM);
+	registerEnumIn("configKeys", ConfigManager::REPLACE_KICK_ON_LOGIN);
+	registerEnumIn("configKeys", ConfigManager::ALLOW_CLONES);
+	registerEnumIn("configKeys", ConfigManager::BIND_ONLY_GLOBAL_ADDRESS);
+	registerEnumIn("configKeys", ConfigManager::OPTIMIZE_DATABASE);
+	registerEnumIn("configKeys", ConfigManager::MARKET_PREMIUM);
+	registerEnumIn("configKeys", ConfigManager::EMOTE_SPELLS);
+	registerEnumIn("configKeys", ConfigManager::STAMINA_SYSTEM);
+	registerEnumIn("configKeys", ConfigManager::WARN_UNSAFE_SCRIPTS);
+	registerEnumIn("configKeys", ConfigManager::CONVERT_UNSAFE_SCRIPTS);
+	registerEnumIn("configKeys", ConfigManager::CLASSIC_EQUIPMENT_SLOTS);
+	registerEnumIn("configKeys", ConfigManager::CLASSIC_ATTACK_SPEED);
+	registerEnumIn("configKeys", ConfigManager::ALLOW_DUAL_WIELDING);
+	registerEnumIn("configKeys", ConfigManager::DUAL_WIELDING_SPEED_RATE);
+	registerEnumIn("configKeys", ConfigManager::DUAL_WIELDING_DAMAGE_RATE);
+	registerEnumIn("configKeys", ConfigManager::DUAL_WIELDING_MODE);
+	registerEnumIn("configKeys", ConfigManager::SERVER_SAVE_NOTIFY_MESSAGE);
+	registerEnumIn("configKeys", ConfigManager::SERVER_SAVE_CLEAN_MAP);
+	registerEnumIn("configKeys", ConfigManager::SERVER_SAVE_CLOSE);
+	registerEnumIn("configKeys", ConfigManager::SERVER_SAVE_SHUTDOWN);
+	registerEnumIn("configKeys", ConfigManager::ONLINE_OFFLINE_CHARLIST);
+	registerEnumIn("configKeys", ConfigManager::HOUSE_DOOR_SHOW_PRICE);
+	registerEnumIn("configKeys", ConfigManager::MONSTER_OVERSPAWN);
+	registerEnumIn("configKeys", ConfigManager::REMOVE_ON_DESPAWN);
+	registerEnumIn("configKeys", ConfigManager::PROTECTION_TIME);
+	registerEnumIn("configKeys", ConfigManager::BED_OFFLINE_TRAINING);
+	registerEnumIn("configKeys", ConfigManager::CHECK_DUPLICATE_STORAGE_KEYS);
+	registerEnumIn("configKeys", ConfigManager::FORGE_SYSTEM_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::IMBUEMENT_SYSTEM_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::MONK_VOCATION_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::FAMILIAR_SYSTEM_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::WHEEL_SYSTEM_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::CHAIN_SYSTEM_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::BESTIARY_SYSTEM_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::ECHO_RAID_SYSTEM_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::MARKET_SYSTEM_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::PREY_SYSTEM_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::BATTLEPASS_SYSTEM_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::WEAPON_PROFICIENCY_SYSTEM_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::AUGMENT_SYSTEM_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::MONSTER_LEVEL_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::LOOT_GROUPING_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::HIRELING_SYSTEM_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::MELEE_WEAPON_SWING_MARKS_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::ASTRA_HIRELING_PROTOCOL_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::COLORIZED_LOOT_VALUE);
+	registerEnumIn("configKeys", ConfigManager::ITEM_TIER_DISPLAY);
+	registerEnumIn("configKeys", ConfigManager::ITEM_UPGRADE_CLASSIFICATION);
+	registerEnumIn("configKeys", ConfigManager::ALLOW_MOUNT_IN_PZ);
+	registerEnumIn("configKeys", ConfigManager::MODIFY_DAMAGE_IN_K);
+	registerEnumIn("configKeys", ConfigManager::MODIFY_EXP_IN_K);
+	registerEnumIn("configKeys", ConfigManager::DEFAULT_HEALTH_DISPLAY_PERCENT);
+	registerEnumIn("configKeys", ConfigManager::TASK_HUNTING_SYSTEM_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::BOUNTY_TASKS_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::WEEKLY_TASKS_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::SOULPIT_SYSTEM_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::SOULSEALS_SYSTEM_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::CLEAVE_SYSTEM_ENABLED);
+	registerEnumIn("configKeys", ConfigManager::RELOAD_COMMAND_ENABLED);
+
+	registerEnumIn("configKeys", ConfigManager::MAP_NAME);
+	registerEnumIn("configKeys", ConfigManager::HOUSE_RENT_PERIOD);
+	registerEnumIn("configKeys", ConfigManager::SERVER_NAME);
+	registerEnumIn("configKeys", ConfigManager::OWNER_NAME);
+	registerEnumIn("configKeys", ConfigManager::OWNER_EMAIL);
+	registerEnumIn("configKeys", ConfigManager::URL);
+	registerEnumIn("configKeys", ConfigManager::LOCATION);
+	registerEnumIn("configKeys", ConfigManager::IP);
+	registerEnumIn("configKeys", ConfigManager::MOTD);
+	registerEnumIn("configKeys", ConfigManager::WORLD_TYPE);
+	registerEnumIn("configKeys", ConfigManager::MYSQL_HOST);
+	registerEnumIn("configKeys", ConfigManager::MYSQL_USER);
+	registerEnumIn("configKeys", ConfigManager::MYSQL_PASS);
+	registerEnumIn("configKeys", ConfigManager::MYSQL_DB);
+	registerEnumIn("configKeys", ConfigManager::MYSQL_SOCK);
+	registerEnumIn("configKeys", ConfigManager::DEFAULT_PRIORITY);
+	registerEnumIn("configKeys", ConfigManager::MAP_AUTHOR);
+
+	registerEnumIn("configKeys", ConfigManager::SERVER_SAVE_NOTIFY_DURATION);
+	registerEnumIn("configKeys", ConfigManager::SQL_PORT);
+	registerEnumIn("configKeys", ConfigManager::MAX_PLAYERS);
+	registerEnumIn("configKeys", ConfigManager::PZ_LOCKED);
+	registerEnumIn("configKeys", ConfigManager::DEFAULT_DESPAWNRANGE);
+	registerEnumIn("configKeys", ConfigManager::DEFAULT_DESPAWNRADIUS);
+	registerEnumIn("configKeys", ConfigManager::DEFAULT_WALKTOSPAWNRADIUS);
+	registerEnumIn("configKeys", ConfigManager::RATE_EXPERIENCE);
+	registerEnumIn("configKeys", ConfigManager::RATE_SKILL);
+	registerEnumIn("configKeys", ConfigManager::RATE_LOOT);
+	registerEnumIn("configKeys", ConfigManager::RATE_MAGIC);
+	registerEnumIn("configKeys", ConfigManager::RATE_SPAWN);
+	registerEnumIn("configKeys", ConfigManager::HOUSE_LEVEL);
+	registerEnumIn("configKeys", ConfigManager::HOUSE_PRICE);
+	registerEnumIn("configKeys", ConfigManager::KILLS_TO_RED);
+	registerEnumIn("configKeys", ConfigManager::KILLS_TO_BLACK);
+	registerEnumIn("configKeys", ConfigManager::MAX_MESSAGEBUFFER);
+	registerEnumIn("configKeys", ConfigManager::ACTIONS_DELAY_INTERVAL);
+	registerEnumIn("configKeys", ConfigManager::EX_ACTIONS_DELAY_INTERVAL);
+	registerEnumIn("configKeys", ConfigManager::KICK_AFTER_MINUTES);
+	registerEnumIn("configKeys", ConfigManager::PROTECTION_LEVEL);
+	registerEnumIn("configKeys", ConfigManager::DEATH_LOSE_PERCENT);
+	registerEnumIn("configKeys", ConfigManager::STATUSQUERY_TIMEOUT);
+	registerEnumIn("configKeys", ConfigManager::FRAG_TIME);
+	registerEnumIn("configKeys", ConfigManager::WHITE_SKULL_TIME);
+	registerEnumIn("configKeys", ConfigManager::GAME_PORT);
+	registerEnumIn("configKeys", ConfigManager::LOGIN_PORT);
+	registerEnumIn("configKeys", ConfigManager::STATUS_PORT);
+	registerEnumIn("configKeys", ConfigManager::STAIRHOP_DELAY);
+	registerEnumIn("configKeys", ConfigManager::MARKET_OFFER_DURATION);
+	registerEnumIn("configKeys", ConfigManager::EXP_SHARE_RANGE);
+	registerEnumIn("configKeys", ConfigManager::EXP_SHARE_FLOORS);
+	registerEnumIn("configKeys", ConfigManager::EXP_FROM_PLAYERS_LEVEL_RANGE);
+	registerEnumIn("configKeys", ConfigManager::MAX_PACKETS_PER_SECOND);
+	registerEnumIn("configKeys", ConfigManager::QUICK_LOOT_MAX_CORPSES);
+	registerEnumIn("configKeys", ConfigManager::TASK_BOARD_ACTION_COOLDOWN_MS);
+	registerEnumIn("configKeys", ConfigManager::ECHO_RAID_PORTAL_SPAWN_NUMERATOR);
+	registerEnumIn("configKeys", ConfigManager::ECHO_RAID_PORTAL_SPAWN_DENOMINATOR);
+	registerEnumIn("configKeys", ConfigManager::BATTLEPASS_REWARD_MAX_STEP);
+	registerEnumIn("configKeys", ConfigManager::BATTLEPASS_SHOP_UNLOCK_STEP);
+	registerEnumIn("configKeys", ConfigManager::STAMINA_REGEN_MINUTE);
+	registerEnumIn("configKeys", ConfigManager::STAMINA_REGEN_PREMIUM);
+	registerEnumIn("configKeys", ConfigManager::STAMINA_TRAINER);
+	registerEnumIn("configKeys", ConfigManager::STAMINA_PZ);
+	registerEnumIn("configKeys", ConfigManager::STAMINA_PZ_GAIN);
+	registerEnumIn("configKeys", ConfigManager::STAMINA_ORANGE_DELAY);
+	registerEnumIn("configKeys", ConfigManager::STAMINA_GREEN_DELAY);
+	registerEnumIn("configKeys", ConfigManager::STAMINA_TRAINER_DELAY);
+	registerEnumIn("configKeys", ConfigManager::STAMINA_TRAINER_GAIN);
+	registerEnumIn("configKeys", ConfigManager::REWARD_BASE_RATE);
+	registerEnumIn("configKeys", ConfigManager::REWARD_RATE_DAMAGE_DONE);
+	registerEnumIn("configKeys", ConfigManager::REWARD_RATE_DAMAGE_TAKEN);
+	registerEnumIn("configKeys", ConfigManager::REWARD_RATE_HEALING_DONE);
+	registerEnumIn("configKeys", ConfigManager::MAX_ALLOWED_ON_A_DUMMY);
+	registerEnumIn("configKeys", ConfigManager::RATE_EXERCISE_TRAINING_SPEED);
+	registerEnumIn("configKeys", ConfigManager::NPCS_USING_BANK_MONEY);
+	registerEnumIn("configKeys", ConfigManager::AUTOLOOT_AUTO_BANK);
+	registerEnumIn("configKeys", ConfigManager::AUTOLOOT_GOLD_POUCH);
+	registerEnumIn("configKeys", ConfigManager::BOOSTED_EXP_MULTIPLIER);
+	registerEnumIn("configKeys", ConfigManager::BOOSTED_LOOT_MULTIPLIER);
+	registerEnumIn("configKeys", ConfigManager::BOOSTED_SPAWN_MULTIPLIER);
+	registerEnumIn("configKeys", ConfigManager::WEAPON_PROFICIENCY_EXPERIENCE_GAIN_MULTIPLIER);
+	registerEnumIn("configKeys", ConfigManager::BOOSTED_BOSS_LOOT_BONUS);
+	registerEnumIn("configKeys", ConfigManager::BOOSTED_BOSS_KILL_BONUS);
+	registerEnumIn("configKeys", ConfigManager::DEFAULT_EXP_COLOR);
+	registerEnumIn("configKeys", ConfigManager::BOSS_DEFAULT_TIME_TO_FIGHT_AGAIN);
+	registerEnumIn("configKeys", ConfigManager::BOSS_DEFAULT_TIME_TO_DEFEAT);
+
+	// os
+	registerMethod("os", "mtime", LuaScriptInterface::luaSystemTime);
+	registerMethod("os", "ntime", LuaScriptInterface::luaSystemNanoTime);
+
+	// table
+	registerMethod("table", "create", LuaScriptInterface::luaTableCreate);
+
+	// lua modules
+	registerGame();
+	registerVariant();
+	registerPosition();
+	registerZone();
+	registerTile();
+	registerNetworkMessage();
+	registerItem();
+	registerImbuement();
+	registerContainer();
+	registerTeleport();
+	registerCreature();
+	registerPlayer();
+	registerModalWindow();
+	registerMonster();
+	registerNpc();
+	registerNpcType();
+	registerGuild();
+	registerGroup();
+	registerVocation();
+	registerTown();
+	registerHouse();
+	registerItemType();
+	registerCombat();
+	registerChatChannel();
+	registerCondition();
+	registerOutfit();
+	registerMonsterType();
+	registerLoot();
+	registerMonsterSpell();
+	registerParty();
+	registerSpells();
+	registerActions();
+	registerTalkActions();
+	registerCreatureEvents();
+	registerMoveEvents();
+	registerGlobalEvents();
+	registerWeapons();
+	registerXML();
+	registerKV();
+	registerStressReactor();
+}
+
+#undef registerEnum
+#undef registerEnumIn
+
+void LuaScriptInterface::registerClass(const std::string& className, const std::string& baseClass,
+                                       lua_CFunction newFunction /* = nullptr*/)
+{
+	// className = {}
+	lua_newtable(luaState);
+	lua_pushvalue(luaState, -1);
+	lua_setglobal(luaState, className.c_str());
+	int methods = lua_gettop(luaState);
+
+	// methodsTable = {}
+	lua_newtable(luaState);
+	int methodsTable = lua_gettop(luaState);
+
+	if (newFunction) {
+		// className.__call = newFunction
+		lua_pushcfunction(luaState, newFunction);
+		lua_setfield(luaState, methodsTable, "__call");
+	}
+
+	uint32_t parents = 0;
+	if (!baseClass.empty()) {
+		lua_getglobal(luaState, baseClass.c_str());
+		lua_rawgeti(luaState, -1, 'p');
+		parents = Lua::getInteger<uint32_t>(luaState, -1) + 1;
+		lua_pop(luaState, 1);
+		lua_setfield(luaState, methodsTable, "__index");
+	}
+
+	// setmetatable(className, methodsTable)
+	lua_setmetatable(luaState, methods);
+
+	// className.metatable = {}
+	luaL_newmetatable(luaState, className.c_str());
+	int metatable = lua_gettop(luaState);
+
+	// className.metatable.__metatable = className
+	lua_pushvalue(luaState, methods);
+	lua_setfield(luaState, metatable, "__metatable");
+
+	// className.metatable.__index = className
+	lua_pushvalue(luaState, methods);
+	lua_setfield(luaState, metatable, "__index");
+
+	// className.metatable['h'] = hash
+	lua_pushinteger(luaState, std::hash<std::string>()(className));
+	lua_rawseti(luaState, metatable, 'h');
+
+	// className.metatable['p'] = parents
+	lua_pushinteger(luaState, parents);
+	lua_rawseti(luaState, metatable, 'p');
+
+	static std::unordered_map<std::string_view, LuaDataType> LuaDataTypeByClassName = {
+	    {"Item", LuaData_Item},
+	    {"Container", LuaData_Container},
+	    {"Teleport", LuaData_Teleport},
+	    {"Creature", LuaData_Creature},
+	    {"Player", LuaData_Player},
+	    {"Monster", LuaData_Monster},
+	    {"Npc", LuaData_Npc},
+	    {"Tile", LuaData_Tile},
+	    {"Condition", LuaData_Condition},
+
+	    {"Combat", LuaData_Combat},
+	    {"ChatChannel", LuaData_ChatChannel},
+	    {"Group", LuaData_Group},
+	    {"Guild", LuaData_Guild},
+	    {"House", LuaData_House},
+	    {"ItemType", LuaData_ItemType},
+	    {"ModalWindow", LuaData_ModalWindow},
+	    {"MonsterType", LuaData_MonsterType},
+		{"NpcType", LuaData_NpcType},
+	    {"NetworkMessage", LuaData_NetworkMessage},
+	    {"Party", LuaData_Party},
+	    {"Vocation", LuaData_Vocation},
+	    {"Town", LuaData_Town},
+	    {"LuaVariant", LuaData_LuaVariant},
+	    {"Position", LuaData_Position},
+
+	    {"Outfit", LuaData_Outfit},
+	    {"Loot", LuaData_Loot},
+	    {"MonsterSpell", LuaData_MonsterSpell},
+	    {"Spell", LuaData_Spell},
+	    {"InstantSpell", LuaData_Spell},
+	    {"Action", LuaData_Action},
+	    {"TalkAction", LuaData_TalkAction},
+	    {"CreatureEvent", LuaData_CreatureEvent},
+	    {"MoveEvent", LuaData_MoveEvent},
+	    {"GlobalEvent", LuaData_GlobalEvent},
+	    {"Weapon", LuaData_Weapon},
+	    {"WeaponDistance", LuaData_Weapon},
+	    {"WeaponWand", LuaData_Weapon},
+	    {"WeaponMelee", LuaData_Weapon},
+	    {"XMLDocument", LuaData_XMLDocument},
+	    {"XMLNode", LuaData_XMLNode},
+	    {"Zone", LuaData_Zone},
+	    {"KV", LuaData_KV},
+	};
+
+	// className.metatable['t'] = type
+	auto luaDataType = LuaDataTypeByClassName.find(className);
+	if (luaDataType == LuaDataTypeByClassName.end()) {
+		lua_pushinteger(luaState, LuaData_Unknown);
+	} else {
+		lua_pushinteger(luaState, luaDataType->second);
+	}
+	lua_rawseti(luaState, metatable, 't');
+
+	// pop className, className.metatable
+	lua_pop(luaState, 2);
+}
+
+void LuaScriptInterface::registerTable(std::string_view tableName)
+{
+	// _G[tableName] = {}
+	lua_newtable(luaState);
+	lua_setglobal(luaState, tableName.data());
+}
+
+void LuaScriptInterface::registerMethod(std::string_view globalName, std::string_view methodName, lua_CFunction func)
+{
+	// globalName.methodName = func
+	lua_getglobal(luaState, globalName.data());
+	lua_pushcfunction(luaState, func);
+	lua_setfield(luaState, -2, methodName.data());
+
+	// pop globalName
+	lua_pop(luaState, 1);
+}
+
+void LuaScriptInterface::registerMetaMethod(std::string_view className, std::string_view methodName, lua_CFunction func)
+{
+	// className.metatable.methodName = func
+	luaL_getmetatable(luaState, className.data());
+	lua_pushcfunction(luaState, func);
+	lua_setfield(luaState, -2, methodName.data());
+
+	// pop className.metatable
+	lua_pop(luaState, 1);
+}
+
+void LuaScriptInterface::registerGlobalMethod(std::string_view functionName, lua_CFunction func)
+{
+	// _G[functionName] = func
+	lua_pushcfunction(luaState, func);
+	lua_setglobal(luaState, functionName.data());
+}
+
+void LuaScriptInterface::registerVariable(std::string_view tableName, std::string_view name, lua_Integer value)
+{
+	// tableName.name = value
+	lua_getglobal(luaState, tableName.data());
+	Lua::setField(luaState, name.data(), value);
+
+	// pop tableName
+	lua_pop(luaState, 1);
+}
+
+void LuaScriptInterface::registerGlobalVariable(std::string_view name, lua_Integer value)
+{
+	// _G[name] = value
+	lua_pushinteger(luaState, value);
+	lua_setglobal(luaState, name.data());
+}
+
+void LuaScriptInterface::registerGlobalBoolean(std::string_view name, bool value)
+{
+	// _G[name] = value
+	Lua::pushBoolean(luaState, value);
+	lua_setglobal(luaState, name.data());
+}
+
+int LuaScriptInterface::luaDoPlayerAddItem(lua_State* L)
+{
+	// doPlayerAddItem(cid, itemid, <optional: default: 1> count/subtype, <optional: default: 1> canDropOnMap)
+	// doPlayerAddItem(cid, itemid, <optional: default: 1> count, <optional: default: 1> canDropOnMap, <optional:
+	// default: 1>subtype)
+	Player* player = getRequiredPlayerOrPushFalse(L, 1);
+	if (!player) {
+		return 1;
+	}
+
+	uint16_t itemId = Lua::getInteger<uint16_t>(L, 2);
+	int32_t count = Lua::getInteger<int32_t>(L, 3, 1);
+	bool canDropOnMap = Lua::getBoolean(L, 4, true);
+	uint16_t subType = Lua::getInteger<uint16_t>(L, 5, 1);
+
+	const ItemType& it = Item::items[itemId];
+	int32_t itemCount;
+
+	auto parameters = lua_gettop(L);
+	if (parameters > 4) {
+		// subtype already supplied, count then is the amount
+		itemCount = std::max<int32_t>(1, count);
+	} else if (it.hasSubType()) {
+		if (it.stackable) {
+			itemCount = static_cast<int32_t>(std::ceil(static_cast<float>(count) / static_cast<float>(it.stackSize)));
+		} else {
+			itemCount = 1;
+		}
+		subType = static_cast<uint16_t>(count);
+	} else {
+		itemCount = std::max<int32_t>(1, count);
+	}
+
+	while (itemCount > 0) {
+		uint16_t stackCount = subType;
+		if (it.stackable && stackCount > it.stackSize) {
+			stackCount = it.stackSize;
+		}
+
+		auto itemPtr = Item::CreateItem(itemId, stackCount);
+		if (!itemPtr) {
+			reportErrorFunc(L, getErrorDesc(LuaErrorCode::ITEM_NOT_FOUND));
+			Lua::pushBoolean(L, false);
+			return 1;
+		}
+
+		if (it.stackable) {
+			subType -= stackCount;
+		}
+
+		ReturnValue ret = g_game.internalPlayerAddItem(player, itemPtr.get(), canDropOnMap);
+		if (ret != RETURNVALUE_NOERROR) {
+			Lua::pushBoolean(L, false);
+			return 1;
+		}
+
+		Item* newItem = itemPtr.get();
+		if (--itemCount == 0) {
+			if (newItem->getParent()) {
+				uint32_t uid = getScriptEnv()->addThing(newItem);
+				lua_pushinteger(L, uid);
+				return 1;
+		} else {
+			// stackable item stacked with existing object, newItem will be released
+			Lua::pushBoolean(L, false);
+			return 1;
+		}
+	}
+	}
+
+	Lua::pushBoolean(L, false);
+	return 1;
+}
+
+int LuaScriptInterface::luaTransformToSHA1(lua_State* L)
+{
+	// transformToSHA1(text)
+	Lua::pushString(L, transformToSHA1(Lua::getString(L, 1)));
+	return 1;
+}
+
+int LuaScriptInterface::luaDebugPrint(lua_State* L)
+{
+	// debugPrint(text)
+	reportErrorFunc(L, Lua::getString(L, 1));
+	return 0;
+}
+
+int LuaScriptInterface::luaLogInfo(lua_State* L)
+{
+	g_logger().info(Lua::getString(L, 1));
+	return 0;
+}
+
+int LuaScriptInterface::luaLogMigration(lua_State* L)
+{
+	g_logger().migration(Lua::getString(L, 1));
+	return 0;
+}
+
+int LuaScriptInterface::luaLogWarning(lua_State* L)
+{
+	g_logger().warn(Lua::getString(L, 1));
+	return 0;
+}
+
+int LuaScriptInterface::luaLogError(lua_State* L)
+{
+	g_logger().error(Lua::getString(L, 1));
+	return 0;
+}
+
+int LuaScriptInterface::luaGetWorldTime(lua_State* L)
+{
+	// getWorldTime()
+	int16_t time = g_game.getWorldTime();
+	lua_pushinteger(L, time);
+	return 1;
+}
+
+int LuaScriptInterface::luaGetWorldLight(lua_State* L)
+{
+	// getWorldLight()
+	LightInfo lightInfo = g_game.getWorldLightInfo();
+	lua_pushinteger(L, lightInfo.level);
+	lua_pushinteger(L, lightInfo.color);
+	return 2;
+}
+
+int LuaScriptInterface::luaSetWorldLight(lua_State* L)
+{
+	// setWorldLight(level, color)
+	if (ConfigManager::getBoolean(ConfigManager::DEFAULT_WORLD_LIGHT)) {
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	LightInfo lightInfo;
+	lightInfo.level = Lua::getInteger<uint8_t>(L, 1);
+	lightInfo.color = Lua::getInteger<uint8_t>(L, 2);
+	g_game.setWorldLightInfo(lightInfo);
+	Lua::pushBoolean(L, true);
+	return 1;
+}
+
+int LuaScriptInterface::luaGetWorldUpTime(lua_State* L)
+{
+	// getWorldUpTime()
+	uint64_t uptime = (OTSYS_TIME() - ProtocolStatus::start) / 1000;
+	lua_pushinteger(L, uptime);
+	return 1;
+}
+
+int LuaScriptInterface::luaGetSubTypeName(lua_State* L)
+{
+	// getSubTypeName(subType)
+	const FluidTypes_t subType = Lua::getInteger<FluidTypes_t>(L, 1);
+	switch (subType) {
+		case FLUID_WATER:
+			Lua::pushString(L, "water");
+			break;
+		case FLUID_BLOOD:
+			Lua::pushString(L, "blood");
+			break;
+		case FLUID_BEER:
+			Lua::pushString(L, "beer");
+			break;
+		case FLUID_SLIME:
+			Lua::pushString(L, "slime");
+			break;
+		case FLUID_LEMONADE:
+			Lua::pushString(L, "lemonade");
+			break;
+		case FLUID_MILK:
+			Lua::pushString(L, "milk");
+			break;
+		case FLUID_MANA:
+			Lua::pushString(L, "manafluid");
+			break;
+		case FLUID_INK:
+			Lua::pushString(L, "ink");
+			break;
+		case FLUID_LIFE:
+			Lua::pushString(L, "lifefluid");
+			break;
+		case FLUID_OIL:
+			Lua::pushString(L, "oil");
+			break;
+		case FLUID_URINE:
+			Lua::pushString(L, "urine");
+			break;
+		case FLUID_COCONUTMILK:
+			Lua::pushString(L, "coconut milk");
+			break;
+		case FLUID_WINE:
+			Lua::pushString(L, "wine");
+			break;
+		case FLUID_MUD:
+			Lua::pushString(L, "mud");
+			break;
+		case FLUID_FRUITJUICE:
+			Lua::pushString(L, "fruit juice");
+			break;
+		case FLUID_LAVA:
+			Lua::pushString(L, "lava");
+			break;
+		case FLUID_RUM:
+			Lua::pushString(L, "rum");
+			break;
+		case FLUID_SWAMP:
+			Lua::pushString(L, "swamp");
+			break;
+		case FLUID_TEA:
+			Lua::pushString(L, "tea");
+			break;
+		case FLUID_MEAD:
+			Lua::pushString(L, "mead");
+			break;
+		default:
+			lua_pushnil(L);
+			break;
+	}
+	return 1;
+}
+
+bool LuaScriptInterface::getArea(lua_State* L, std::vector<uint32_t>& vec, uint32_t& rows)
+{
+	lua_pushnil(L);
+	for (rows = 0; lua_next(L, -2) != 0; ++rows) {
+		if (!Lua::isTable(L, -1)) {
+			return false;
+		}
+
+		lua_pushnil(L);
+		while (lua_next(L, -2) != 0) {
+			if (!Lua::isInteger(L, -1)) {
+				return false;
+			}
+			vec.push_back(Lua::getInteger<uint32_t>(L, -1));
+			lua_pop(L, 1);
+		}
+
+		lua_pop(L, 1);
+	}
+
+	lua_pop(L, 1);
+	return (rows != 0);
+}
+
+int LuaScriptInterface::luaCreateCombatArea(lua_State* L)
+{
+	// createCombatArea( {area}, <optional> {extArea} )
+	ScriptEnvironment* env = getScriptEnv();
+	if (env->getScriptId() != EVENT_ID_LOADING) {
+		reportErrorFunc(L, "This function can only be used while loading the script.");
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	uint32_t areaId = g_luaEnvironment.createAreaObject(env->getScriptInterface());
+	AreaCombat* area = g_luaEnvironment.getAreaObject(areaId);
+
+	int parameters = lua_gettop(L);
+	if (parameters >= 2) {
+		uint32_t rowsExtArea;
+		std::vector<uint32_t> vecExtArea;
+		if (!Lua::isTable(L, 2) || !getArea(L, vecExtArea, rowsExtArea)) {
+			reportErrorFunc(L, "Invalid extended area table.");
+			Lua::pushBoolean(L, false);
+			return 1;
+		}
+		area->setupExtArea(vecExtArea, rowsExtArea);
+	}
+
+	uint32_t rowsArea = 0;
+	std::vector<uint32_t> vecArea;
+	if (!Lua::isTable(L, 1) || !getArea(L, vecArea, rowsArea)) {
+		reportErrorFunc(L, "Invalid area table.");
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	area->setupArea(vecArea, rowsArea);
+	lua_pushinteger(L, areaId);
+	return 1;
+}
+
+int LuaScriptInterface::luaDoAreaCombat(lua_State* L)
+{
+	// doAreaCombat(cid, type, pos, area, min, max, effect[, origin = ORIGIN_SPELL[, blockArmor = false[, blockShield =
+	// false[, ignoreResistances = false]]]])
+	Creature* creature = Lua::getCreature(L, 1);
+	if (!creature && (!Lua::isInteger(L, 1) || Lua::getInteger<uint32_t>(L, 1) != 0)) {
+		reportErrorFunc(L, getErrorDesc(LuaErrorCode::CREATURE_NOT_FOUND));
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	uint32_t areaId = Lua::getInteger<uint32_t>(L, 4);
+	const AreaCombat* area = g_luaEnvironment.getAreaObject(areaId);
+	if (area || areaId == 0) {
+		CombatType_t combatType = Lua::getInteger<CombatType_t>(L, 2);
+
+		CombatParams params;
+		params.combatType = combatType;
+		params.impactEffect = Lua::getInteger<uint16_t>(L, 7);
+		params.blockedByArmor = Lua::getBoolean(L, 8, false);
+		params.blockedByShield = Lua::getBoolean(L, 9, false);
+		params.ignoreResistances = Lua::getBoolean(L, 10, false);
+
+		CombatDamage damage;
+		damage.origin = Lua::getInteger<CombatOrigin>(L, 8, ORIGIN_SPELL);
+		damage.primary.type = combatType;
+		damage.primary.value = normal_random(Lua::getNumber<int32_t>(L, 6), Lua::getNumber<int32_t>(L, 5));
+
+		Combat::doAreaCombat(creature, Lua::getPosition(L, 3), area, damage, params);
+		Lua::pushBoolean(L, true);
+	} else {
+		reportErrorFunc(L, getErrorDesc(LuaErrorCode::AREA_NOT_FOUND));
+		Lua::pushBoolean(L, false);
+	}
+	return 1;
+}
+
+int LuaScriptInterface::luaDoTargetCombat(lua_State* L)
+{
+	// doTargetCombat(cid, target, type, min, max, effect[, origin = ORIGIN_SPELL[, blockArmor = false[, blockShield =
+	// false[, ignoreResistances = false]]]])
+	Creature* creature = Lua::getCreature(L, 1);
+	if (!creature && (!Lua::isInteger(L, 1) || Lua::getInteger<uint32_t>(L, 1) != 0)) {
+		reportErrorFunc(L, getErrorDesc(LuaErrorCode::CREATURE_NOT_FOUND));
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	Creature* target = Lua::getCreature(L, 2);
+	if (!target) {
+		reportErrorFunc(L, getErrorDesc(LuaErrorCode::CREATURE_NOT_FOUND));
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	CombatType_t combatType = Lua::getInteger<CombatType_t>(L, 3);
+
+	CombatParams params;
+	params.combatType = combatType;
+	params.impactEffect = Lua::getInteger<uint16_t>(L, 6);
+	params.blockedByArmor = Lua::getBoolean(L, 8, false);
+	params.blockedByShield = Lua::getBoolean(L, 9, false);
+	params.ignoreResistances = Lua::getBoolean(L, 10, false);
+
+	CombatDamage damage;
+	damage.origin = Lua::getInteger<CombatOrigin>(L, 7, ORIGIN_SPELL);
+	damage.primary.type = combatType;
+	damage.primary.value = normal_random(Lua::getNumber<int32_t>(L, 4), Lua::getNumber<int32_t>(L, 5));
+
+	Combat::doTargetCombat(creature, target, damage, params);
+	Lua::pushBoolean(L, true);
+	return 1;
+}
+
+int LuaScriptInterface::luaDoChallengeCreature(lua_State* L)
+{
+	// doChallengeCreature(cid, target[, force = false])
+	Creature* creature = Lua::getCreature(L, 1);
+	if (!creature) {
+		reportErrorFunc(L, getErrorDesc(LuaErrorCode::CREATURE_NOT_FOUND));
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	Creature* target = Lua::getCreature(L, 2);
+	if (!target) {
+		reportErrorFunc(L, getErrorDesc(LuaErrorCode::CREATURE_NOT_FOUND));
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	target->challengeCreature(creature, Lua::getBoolean(L, 3, false));
+	Lua::pushBoolean(L, true);
+	return 1;
+}
+
+int LuaScriptInterface::luaIsValidUID(lua_State* L)
+{
+	// isValidUID(uid)
+	Lua::pushBoolean(L, getScriptEnv()->getThingByUID(Lua::getInteger<uint32_t>(L, 1)) != nullptr);
+	return 1;
+}
+
+int LuaScriptInterface::luaIsDepot(lua_State* L)
+{
+	// isDepot(uid)
+	Container* container = getScriptEnv()->getContainerByUID(Lua::getInteger<uint32_t>(L, 1));
+	Lua::pushBoolean(L, container && container->getDepotLocker());
+	return 1;
+}
+
+int LuaScriptInterface::luaIsMoveable(lua_State* L)
+{
+	// isMoveable(uid)
+	// isMovable(uid)
+	Thing* thing = getScriptEnv()->getThingByUID(Lua::getInteger<uint32_t>(L, 1));
+	Lua::pushBoolean(L, thing && thing->isPushable());
+	return 1;
+}
+
+int LuaScriptInterface::luaDoAddContainerItem(lua_State* L)
+{
+	// doAddContainerItem(uid, itemid, <optional> count/subtype)
+	uint32_t uid = Lua::getInteger<uint32_t>(L, 1);
+
+	ScriptEnvironment* env = getScriptEnv();
+	Container* container = env->getContainerByUID(uid);
+	if (!container) {
+		reportErrorFunc(L, getErrorDesc(LuaErrorCode::CONTAINER_NOT_FOUND));
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	uint16_t itemId = Lua::getInteger<uint16_t>(L, 2);
+	const ItemType& it = Item::items[itemId];
+
+	int32_t itemCount = 1;
+	int32_t subType = 1;
+	uint32_t count = Lua::getInteger<uint32_t>(L, 3, 1);
+
+	if (it.hasSubType()) {
+		if (it.stackable) {
+			itemCount = static_cast<int32_t>(std::ceil(static_cast<float>(count) / static_cast<float>(it.stackSize)));
+		}
+
+		subType = count;
+	} else {
+		itemCount = std::max<int32_t>(1, count);
+	}
+
+	while (itemCount > 0) {
+		int32_t stackCount = std::min<int32_t>(subType, it.stackSize);
+		auto itemPtr = Item::CreateItem(itemId, static_cast<uint16_t>(stackCount));
+		if (!itemPtr) {
+			reportErrorFunc(L, getErrorDesc(LuaErrorCode::ITEM_NOT_FOUND));
+			Lua::pushBoolean(L, false);
+			return 1;
+		}
+
+		if (it.stackable) {
+			subType -= stackCount;
+		}
+
+		ReturnValue ret = g_game.internalAddItem(container, itemPtr.get());
+		if (ret != RETURNVALUE_NOERROR) {
+			Lua::pushBoolean(L, false);
+			return 1;
+		}
+
+		Item* newItem = itemPtr.get();
+		if (--itemCount == 0) {
+			if (newItem->getParent()) {
+				lua_pushinteger(L, env->addThing(newItem));
+			} else {
+				// stackable item stacked with existing object, newItem will be released
+				Lua::pushBoolean(L, false);
+			}
+			return 1;
+		}
+	}
+
+	Lua::pushBoolean(L, false);
+	return 1;
+}
+
+int LuaScriptInterface::luaGetDepotId(lua_State* L)
+{
+	// getDepotId(uid)
+	uint32_t uid = Lua::getInteger<uint32_t>(L, 1);
+
+	Container* container = getScriptEnv()->getContainerByUID(uid);
+	if (!container) {
+		reportErrorFunc(L, getErrorDesc(LuaErrorCode::CONTAINER_NOT_FOUND));
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	DepotLocker* depotLocker = container->getDepotLocker();
+	if (!depotLocker) {
+		reportErrorFunc(L, "Depot not found");
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	lua_pushinteger(L, depotLocker->getDepotId());
+	return 1;
+}
+
+int LuaScriptInterface::luaAddEvent(lua_State* L)
+{
+	// addEvent(callback, delay, ...)
+	int parameters = lua_gettop(L);
+	if (parameters < 2) {
+		reportErrorFunc(L, fmt::format("Not enough parameters: {:d}.", parameters));
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	if (!Lua::isFunction(L, 1)) {
+		reportErrorFunc(L, "callback parameter should be a function.");
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	std::string eventOrigin;
+	lua_Debug functionInfo {};
+	lua_pushvalue(L, 1);
+	if (lua_getinfo(L, ">S", &functionInfo) != 0 && functionInfo.source) {
+		eventOrigin = functionInfo.source;
+		if (!eventOrigin.empty() && eventOrigin.front() == '@') {
+			eventOrigin.erase(eventOrigin.begin());
+		}
+		if (functionInfo.linedefined > 0) {
+			eventOrigin += fmt::format(":{}", functionInfo.linedefined);
+		}
+	}
+	if (eventOrigin.empty()) {
+		auto* env = getScriptEnv();
+		auto* interface = env->getScriptInterface();
+		eventOrigin = interface ? std::string(interface->getFileById(env->getScriptId())) : "(Unknown Lua timer)";
+	}
+
+	// if (!Lua::isInteger(L, 2)) {
+	// 	reportErrorFunc(L, "delay parameter should be a integer.");
+	// 	Lua::pushBoolean(L, false);
+	// 	return 1;
+	// }
+
+	if (getBoolean(ConfigManager::WARN_UNSAFE_SCRIPTS) || getBoolean(ConfigManager::CONVERT_UNSAFE_SCRIPTS)) {
+		std::vector<std::pair<int32_t, LuaDataType>> indexes;
+		for (int i = 3; i <= parameters; ++i) {
+			if (lua_getmetatable(L, i) == 0) {
+				continue;
+			}
+
+			lua_rawgeti(L, -1, 't');
+			LuaDataType type = Lua::getInteger<LuaDataType>(L, -1);
+			lua_pop(L, 2);
+
+			switch (type) {
+				case LuaData_Unknown:
+				case LuaData_Tile: {
+					break;
+				}
+
+				case LuaData_Player:
+				case LuaData_Monster:
+				case LuaData_Npc: {
+					if (auto creature = Lua::getCreature(L, i)) {
+						lua_pushinteger(L, creature->getID());
+						lua_setiuservalue(L, i, 2);
+					}
+
+					break;
+				}
+
+				case LuaData_Item:
+				case LuaData_Container:
+				case LuaData_Teleport: {
+					indexes.push_back({i, type});
+					break;
+				}
+
+				default: {
+					break;
+				}
+			}
+		}
+
+		if (!indexes.empty()) {
+			if (getBoolean(ConfigManager::WARN_UNSAFE_SCRIPTS)) {
+				bool plural = indexes.size() > 1;
+
+				std::string warningString = "Argument";
+				if (plural) {
+					warningString += 's';
+				}
+
+				for (const auto& entry : indexes) {
+					if (entry == indexes.front()) {
+						warningString += ' ';
+					} else if (entry == indexes.back()) {
+						warningString += " and ";
+					} else {
+						warningString += ", ";
+					}
+					warningString += '#';
+					warningString += std::to_string(entry.first);
+				}
+
+				if (plural) {
+					warningString += " are unsafe";
+				} else {
+					warningString += " is unsafe";
+				}
+
+				reportErrorFunc(L, warningString);
+			}
+
+			if (getBoolean(ConfigManager::CONVERT_UNSAFE_SCRIPTS)) {
+				for (const auto& entry : indexes) {
+					switch (entry.second) {
+						case LuaData_Item:
+						case LuaData_Container:
+						case LuaData_Teleport: {
+							lua_getglobal(L, "Item");
+							lua_getfield(L, -1, "getUniqueId");
+							break;
+						}
+						default:
+							break;
+					}
+					lua_replace(L, -2);
+					lua_pushvalue(L, entry.first);
+					lua_call(L, 1, 1);
+					lua_replace(L, entry.first);
+				}
+			}
+		}
+	}
+
+	LuaTimerEventDesc eventDesc;
+	eventDesc.parameters.reserve(parameters -
+	                             2); // safe to use -2 since we garanteed that there is at least two parameters
+	for (int i = 0; i < parameters - 2; ++i) {
+		eventDesc.parameters.push_back(luaL_ref(L, LUA_REGISTRYINDEX));
+	}
+
+	uint32_t delay = std::max<uint32_t>(MIN_TASK_INTERVAL, Lua::getInteger<uint32_t>(L, 2));
+	lua_pop(L, 1);
+
+	eventDesc.function = luaL_ref(L, LUA_REGISTRYINDEX);
+	eventDesc.scriptId = getScriptEnv()->getScriptId();
+	eventDesc.origin = eventOrigin;
+
+	auto& lastTimerEventId = g_luaEnvironment.lastEventTimerId;
+	const uint32_t timerEventId = lastTimerEventId;
+	eventDesc.eventId = g_scheduler.addEvent(createSchedulerTaskWithStats(
+	    delay, [timerEventId]() { g_luaEnvironment.executeTimerEvent(timerEventId); }, "Lua timer callback", eventOrigin));
+
+	if (eventDesc.eventId == 0) {
+		// The scheduler refused the event: it is not running, or the reactor's
+		// scheduleInbox overflowed and dropped the task. executeTimerEvent() will
+		// therefore never run, so nothing would ever release these registry refs.
+		// Drop them here instead of registering an event that can never fire —
+		// otherwise the refs, and every game object the userdata keeps alive,
+		// leak until shutdown.
+		luaL_unref(L, LUA_REGISTRYINDEX, eventDesc.function);
+		for (auto parameter : eventDesc.parameters) {
+			luaL_unref(L, LUA_REGISTRYINDEX, parameter);
+		}
+		LOG_ERROR("[Error - LuaScriptInterface::luaAddEvent] Scheduler rejected the event; "
+		          "the callback will not run (origin: {})",
+		          eventOrigin);
+		lua_pushnil(L);
+		return 1;
+	}
+
+	g_luaEnvironment.timerEvents.emplace(lastTimerEventId, std::move(eventDesc));
+	lua_pushinteger(L, lastTimerEventId++);
+	return 1;
+}
+
+int LuaScriptInterface::luaStopEvent(lua_State* L)
+{
+	// stopEvent(eventId)
+	uint32_t eventId = Lua::getInteger<uint32_t>(L, 1);
+
+	auto& timerEvents = g_luaEnvironment.timerEvents;
+	auto it = timerEvents.find(eventId);
+	if (it == timerEvents.end()) {
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	LuaTimerEventDesc timerEventDesc = std::move(it->second);
+	timerEvents.erase(it);
+
+	g_scheduler.stopEvent(timerEventDesc.eventId);
+	luaL_unref(L, LUA_REGISTRYINDEX, timerEventDesc.function);
+
+	for (auto parameter : timerEventDesc.parameters) {
+		luaL_unref(L, LUA_REGISTRYINDEX, parameter);
+	}
+
+	Lua::pushBoolean(L, true);
+	return 1;
+}
+
+int LuaScriptInterface::luaSaveServer(lua_State* L)
+{
+	// saveServer([reason = "manual"])
+	g_globalEvents->save();
+	g_game.saveGameState(false, lua_isstring(L, 1) ? Lua::getString(L, 1) : "manual");
+	Lua::pushBoolean(L, true);
+	return 1;
+}
+
+int LuaScriptInterface::luaCleanMap(lua_State* L)
+{
+	// cleanMap()
+	lua_pushinteger(L, g_game.map.clean());
+	return 1;
+}
+
+int LuaScriptInterface::luaIsInWar(lua_State* L)
+{
+	// isInWar(cid, target)
+	Player* player = getRequiredPlayerOrPushFalse(L, 1);
+	if (!player) {
+		return 1;
+	}
+
+	Player* targetPlayer = getRequiredPlayerOrPushFalse(L, 2);
+	if (!targetPlayer) {
+		return 1;
+	}
+
+	Lua::pushBoolean(L, player->isInWar(targetPlayer));
+	return 1;
+}
+
+int LuaScriptInterface::luaGetWaypointPositionByName(lua_State* L)
+{
+	// getWaypointPositionByName(name)
+	auto& waypoints = g_game.map.waypoints;
+
+	auto it = waypoints.find(Lua::getString(L, -1));
+	if (it != waypoints.end()) {
+		Lua::pushPosition(L, it->second);
+	} else {
+		Lua::pushBoolean(L, false);
+	}
+	return 1;
+}
+
+int LuaScriptInterface::luaSendChannelMessage(lua_State* L)
+{
+	// sendChannelMessage(channelId, type, message)
+	uint16_t channelId = Lua::getInteger<uint16_t>(L, 1);
+	ChatChannel* channel = g_chat->getChannelById(channelId);
+	if (!channel) {
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	SpeakClasses type = Lua::getInteger<SpeakClasses>(L, 2);
+	const std::string& message = Lua::getString(L, 3);
+	channel->sendToAll(message, type);
+	Lua::pushBoolean(L, true);
+	return 1;
+}
+
+int LuaScriptInterface::luaSendGuildChannelMessage(lua_State* L)
+{
+	// sendGuildChannelMessage(guildId, type, message)
+	uint32_t guildId = Lua::getInteger<uint32_t>(L, 1);
+	ChatChannel* channel = g_chat->getGuildChannelById(guildId);
+	if (!channel) {
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	SpeakClasses type = Lua::getInteger<SpeakClasses>(L, 2);
+	const std::string& message = Lua::getString(L, 3);
+	channel->sendToAll(message, type);
+	Lua::pushBoolean(L, true);
+	return 1;
+}
+
+int LuaScriptInterface::luaIsScriptsInterface(lua_State* L)
+{
+	// isScriptsInterface()
+	if (getScriptEnv()->getScriptInterface() == &g_scripts->getScriptInterface()) {
+		Lua::pushBoolean(L, true);
+	} else {
+		reportErrorFunc(L, "Event: can only be called inside (data/scripts/)");
+		Lua::pushBoolean(L, false);
+	}
+	return 1;
+}
+
+std::string LuaScriptInterface::escapeString(std::string s)
+{
+	replaceString(s, "\\", "\\\\");
+	replaceString(s, "\"", "\\\"");
+	replaceString(s, "'", "\\'");
+	replaceString(s, "[[", "\\[[");
+	return s;
+}
+
+const luaL_Reg LuaScriptInterface::luaConfigManagerTable[] = {
+    {"getString", LuaScriptInterface::luaConfigManagerGetString},
+    {"getNumber", LuaScriptInterface::luaConfigManagerGetNumber},
+    {"getBoolean", LuaScriptInterface::luaConfigManagerGetBoolean},
+    {"getFloat", LuaScriptInterface::luaConfigManagerGetFloat},
+    {nullptr, nullptr}};
+
+int LuaScriptInterface::luaConfigManagerGetString(lua_State* L)
+{
+	Lua::pushString(L, getString(Lua::getInteger<ConfigManager::String>(L, -1)));
+	return 1;
+}
+
+int LuaScriptInterface::luaConfigManagerGetNumber(lua_State* L)
+{
+	lua_pushinteger(L, getInteger(Lua::getInteger<ConfigManager::Integer>(L, -1)));
+	return 1;
+}
+
+int LuaScriptInterface::luaConfigManagerGetBoolean(lua_State* L)
+{
+	Lua::pushBoolean(L, getBoolean(Lua::getInteger<ConfigManager::Boolean>(L, -1)));
+	return 1;
+}
+
+int LuaScriptInterface::luaConfigManagerGetFloat(lua_State* L)
+{
+	lua_pushnumber(L, ConfigManager::getFloat(Lua::getInteger<ConfigManager::float_config_t>(L, -1)));
+	return 1;
+}
+
+const luaL_Reg LuaScriptInterface::luaDatabaseTable[] = {
+    {"query", LuaScriptInterface::luaDatabaseExecute},
+    {"asyncQuery", LuaScriptInterface::luaDatabaseAsyncExecute},
+    {"storeQuery", LuaScriptInterface::luaDatabaseStoreQuery},
+    {"asyncStoreQuery", LuaScriptInterface::luaDatabaseAsyncStoreQuery},
+    {"escapeString", LuaScriptInterface::luaDatabaseEscapeString},
+    {"escapeBlob", LuaScriptInterface::luaDatabaseEscapeBlob},
+    {"lastInsertId", LuaScriptInterface::luaDatabaseLastInsertId},
+    {"tableExists", LuaScriptInterface::luaDatabaseTableExists},
+    {"beginTransaction", LuaScriptInterface::luaDatabaseBeginTransaction},
+    {"commit", LuaScriptInterface::luaDatabaseCommit},
+    {"rollback", LuaScriptInterface::luaDatabaseRollback},
+    {"affectedRows", LuaScriptInterface::luaDatabaseAffectedRows},
+    {"transaction", LuaScriptInterface::luaDatabaseTransaction},
+    {nullptr, nullptr}};
+
+int LuaScriptInterface::luaDatabaseExecute(lua_State* L)
+{
+	Lua::pushBoolean(L, Database::getInstance().executeQuery(Lua::getString(L, -1)));
+	return 1;
+}
+
+int LuaScriptInterface::luaDatabaseAsyncExecute(lua_State* L)
+{
+	if (Database::getInstance().isInTransaction()) {
+		return pushAsyncTransactionError(L, "db.query()");
+	}
+	std::function<void(DBResult_ptr, bool, uint64_t)> callback;
+	int32_t callbackRef = LUA_NOREF;
+	if (lua_gettop(L) > 1) {
+		int32_t ref = luaL_ref(L, LUA_REGISTRYINDEX);
+		callbackRef = ref;
+		auto scriptId = getScriptEnv()->getScriptId();
+		callback = [ref, scriptId](DBResult_ptr, bool success, uint64_t affectedRows) {
+			lua_State* luaState = g_luaEnvironment.getLuaState();
+			if (!luaState) {
+				return;
+			}
+
+			if (!LuaScriptInterface::reserveScriptEnv()) {
+				luaL_unref(luaState, LUA_REGISTRYINDEX, ref);
+				return;
+			}
+
+			lua_rawgeti(luaState, LUA_REGISTRYINDEX, ref);
+			Lua::pushBoolean(luaState, success);
+			lua_pushinteger(luaState, affectedRows);
+			finishAsyncDatabaseCallback(luaState, ref, scriptId, 2);
+		};
+	}
+
+	// The worker is not running, so the callback that owns this reference will never
+	// run. Release it here or it — and everything the referenced closure keeps alive —
+	// stays in the registry until shutdown.
+	if (!g_databaseTasks.addTask(Lua::getString(L, -1), callback) && callbackRef != LUA_NOREF) {
+		luaL_unref(L, LUA_REGISTRYINDEX, callbackRef);
+	}
+	return 0;
+}
+
+int LuaScriptInterface::luaDatabaseStoreQuery(lua_State* L)
+{
+	if (DBResult_ptr res = Database::getInstance().storeQuery(Lua::getString(L, -1))) {
+		lua_pushinteger(L, getScriptEnv()->addResult(res));
+	} else {
+		Lua::pushBoolean(L, false);
+	}
+	return 1;
+}
+
+int LuaScriptInterface::luaDatabaseAsyncStoreQuery(lua_State* L)
+{
+	if (Database::getInstance().isInTransaction()) {
+		return pushAsyncTransactionError(L, "db.storeQuery()");
+	}
+	std::function<void(DBResult_ptr, bool, uint64_t)> callback;
+	int32_t callbackRef = LUA_NOREF;
+	if (lua_gettop(L) > 1) {
+		int32_t ref = luaL_ref(L, LUA_REGISTRYINDEX);
+		callbackRef = ref;
+		auto scriptId = getScriptEnv()->getScriptId();
+		callback = [ref, scriptId](DBResult_ptr result, bool, uint64_t affectedRows) {
+			lua_State* luaState = g_luaEnvironment.getLuaState();
+			if (!luaState) {
+				return;
+			}
+
+			if (!LuaScriptInterface::reserveScriptEnv()) {
+				luaL_unref(luaState, LUA_REGISTRYINDEX, ref);
+				return;
+			}
+
+			lua_rawgeti(luaState, LUA_REGISTRYINDEX, ref);
+			if (result) {
+				lua_pushinteger(luaState, LuaScriptInterface::getScriptEnv()->addResult(result));
+				lua_pushinteger(luaState, affectedRows);
+			} else {
+				Lua::pushBoolean(luaState, false);
+				lua_pushinteger(luaState, 0);
+			}
+			finishAsyncDatabaseCallback(luaState, ref, scriptId, 2);
+		};
+	}
+	// See luaDatabaseAsyncExecute: a rejected task means the callback never runs, so
+	// the registry reference it would have released has to be dropped here.
+	if (!g_databaseTasks.addTask(Lua::getString(L, -1), callback, true) && callbackRef != LUA_NOREF) {
+		luaL_unref(L, LUA_REGISTRYINDEX, callbackRef);
+	}
+	return 0;
+}
+
+int LuaScriptInterface::luaDatabaseEscapeString(lua_State* L)
+{
+	Lua::pushString(L, Database::getInstance().escapeString(Lua::getString(L, -1)));
+	return 1;
+}
+
+int LuaScriptInterface::luaDatabaseEscapeBlob(lua_State* L)
+{
+	uint32_t length = Lua::getInteger<uint32_t>(L, 2);
+	Lua::pushString(L, Database::getInstance().escapeBlob(Lua::getString(L, 1).c_str(), length));
+	return 1;
+}
+
+int LuaScriptInterface::luaDatabaseLastInsertId(lua_State* L)
+{
+	lua_pushinteger(L, Database::getInstance().getLastInsertId());
+	return 1;
+}
+
+int LuaScriptInterface::luaDatabaseTableExists(lua_State* L)
+{
+	Lua::pushBoolean(L, DatabaseManager::tableExists(Lua::getString(L, -1)));
+	return 1;
+}
+
+int LuaScriptInterface::luaDatabaseBeginTransaction(lua_State* L)
+{
+	bool success = Database::getInstance().beginTransaction();
+	if (success) {
+		getScriptEnv()->hasOpenTransaction = true;
+	}
+	Lua::pushBoolean(L, success);
+	return 1;
+}
+
+int LuaScriptInterface::luaDatabaseCommit(lua_State* L)
+{
+	bool success = Database::getInstance().commit();
+	if (success) {
+		getScriptEnv()->hasOpenTransaction = false;
+	}
+	Lua::pushBoolean(L, success);
+	return 1;
+}
+
+int LuaScriptInterface::luaDatabaseRollback(lua_State* L)
+{
+	bool success = Database::getInstance().rollback();
+	if (success) {
+		getScriptEnv()->hasOpenTransaction = false;
+	}
+	Lua::pushBoolean(L, success);
+	return 1;
+}
+
+int LuaScriptInterface::luaDatabaseAffectedRows(lua_State* L)
+{
+	lua_pushinteger(L, Database::getInstance().getAffectedRows());
+	return 1;
+}
+
+int LuaScriptInterface::luaDatabaseTransaction(lua_State* L)
+{
+	if (!Lua::isFunction(L, 1)) {
+		reportErrorFunc(L, "db.transaction expects a function argument");
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	auto* env = getScriptEnv();
+	if (!Database::getInstance().beginTransaction()) {
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+	env->hasOpenTransaction = true;
+
+	lua_pushvalue(L, 1);
+	int32_t ret = protectedCall(L, 0, 0);
+	if (ret != 0) {
+		Database::getInstance().rollback();
+		env->hasOpenTransaction = false;
+		reportError(nullptr, Lua::popString(L));
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	bool success = Database::getInstance().commit();
+	env->hasOpenTransaction = false;
+	Lua::pushBoolean(L, success);
+	return 1;
+}
+
+const luaL_Reg LuaScriptInterface::luaResultTable[] = {
+    {"getNumber", LuaScriptInterface::luaResultGetNumber}, {"getString", LuaScriptInterface::luaResultGetString},
+    {"getStream", LuaScriptInterface::luaResultGetStream}, {"next", LuaScriptInterface::luaResultNext},
+    {"free", LuaScriptInterface::luaResultFree},           {nullptr, nullptr}};
+
+int LuaScriptInterface::luaResultGetNumber(lua_State* L)
+{
+	DBResult_ptr res = getScriptEnv()->getResultByID(Lua::getInteger<uint32_t>(L, 1));
+	if (!res) {
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	const std::string& s = Lua::getString(L, 2);
+	lua_pushinteger(L, res->getNumber<int64_t>(s));
+	return 1;
+}
+
+int LuaScriptInterface::luaResultGetString(lua_State* L)
+{
+	DBResult_ptr res = getScriptEnv()->getResultByID(Lua::getInteger<uint32_t>(L, 1));
+	if (!res) {
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	const std::string& s = Lua::getString(L, 2);
+	Lua::pushString(L, res->getString(s));
+	return 1;
+}
+
+int LuaScriptInterface::luaResultGetStream(lua_State* L)
+{
+	DBResult_ptr res = getScriptEnv()->getResultByID(Lua::getInteger<uint32_t>(L, 1));
+	if (!res) {
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	auto stream = res->getString(Lua::getString(L, 2));
+	lua_pushlstring(L, stream.data(), stream.size());
+	lua_pushinteger(L, stream.size());
+	return 2;
+}
+
+int LuaScriptInterface::luaResultNext(lua_State* L)
+{
+	DBResult_ptr res = getScriptEnv()->getResultByID(Lua::getInteger<uint32_t>(L, -1));
+	if (!res) {
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	Lua::pushBoolean(L, res->next());
+	return 1;
+}
+
+int LuaScriptInterface::luaResultFree(lua_State* L)
+{
+	Lua::pushBoolean(L, getScriptEnv()->removeResult(Lua::getInteger<uint32_t>(L, -1)));
+	return 1;
+}
+
+// Userdata
+int LuaScriptInterface::luaUserdataCompare(lua_State* L)
+{
+	// userdataA == userdataB
+	const LuaDataType typeA = Lua::getUserdataType(L, 1);
+	const LuaDataType typeB = Lua::getUserdataType(L, 2);
+
+	if (typeA >= LuaData_Creature && typeA <= LuaData_Npc && typeB >= LuaData_Creature && typeB <= LuaData_Npc) {
+		Lua::pushBoolean(L, Lua::getCreature(L, 1) == Lua::getCreature(L, 2));
+		return 1;
+	}
+
+	if (typeA >= LuaData_Item && typeA <= LuaData_Teleport && typeB >= LuaData_Item && typeB <= LuaData_Teleport) {
+		Lua::pushBoolean(L, Lua::getThing(L, 1) == Lua::getThing(L, 2));
+		return 1;
+	}
+
+	if (typeA == LuaData_Condition || typeB == LuaData_Condition) {
+		Lua::pushBoolean(L,
+		                 typeA == typeB &&
+		                     Lua::getSharedPtr<Condition>(L, 1).get() == Lua::getSharedPtr<Condition>(L, 2).get());
+		return 1;
+	}
+
+	if (typeA == LuaData_House || typeB == LuaData_House) {
+		Lua::pushBoolean(L,
+		                 typeA == typeB &&
+		                     Lua::getSharedUserdata<House>(L, 1) == Lua::getSharedUserdata<House>(L, 2));
+		return 1;
+	}
+
+	if (typeA == LuaData_Tile || typeB == LuaData_Tile) {
+		const Tile* tile = Lua::getUserdata<Tile>(L, 1);
+		Lua::pushBoolean(L, typeA == typeB && tile && tile == Lua::getUserdata<Tile>(L, 2));
+		return 1;
+	}
+
+	Lua::pushBoolean(L, Lua::getUserdata<void>(L, 1, false) == Lua::getUserdata<void>(L, 2, false));
+	return 1;
+}
+
+// _G
+int LuaScriptInterface::luaIsType(lua_State* L)
+{
+	// isType(derived, base)
+	lua_getmetatable(L, -2);
+	lua_getmetatable(L, -2);
+
+	lua_rawgeti(L, -2, 'p');
+	uint_fast8_t parentsB = Lua::getInteger<uint_fast8_t>(L, 1);
+
+	lua_rawgeti(L, -3, 'h');
+	size_t hashB = Lua::getInteger<size_t>(L, 1);
+
+	lua_rawgeti(L, -3, 'p');
+	uint_fast8_t parentsA = Lua::getInteger<uint_fast8_t>(L, 1);
+	for (uint_fast8_t i = parentsA; i < parentsB; ++i) {
+		lua_getfield(L, -3, "__index");
+		lua_replace(L, -4);
+	}
+
+	lua_rawgeti(L, -4, 'h');
+	size_t hashA = Lua::getInteger<size_t>(L, 1);
+
+	Lua::pushBoolean(L, hashA == hashB);
+	return 1;
+}
+
+int LuaScriptInterface::luaRawGetMetatable(lua_State* L)
+{
+	// rawgetmetatable(metatableName)
+	luaL_getmetatable(L, Lua::getString(L, 1).c_str());
+	return 1;
+}
+
+// os
+int LuaScriptInterface::luaSystemTime(lua_State* L)
+{
+	// os.mtime()
+	lua_pushinteger(L, OTSYS_TIME());
+	return 1;
+}
+
+int LuaScriptInterface::luaSystemNanoTime(lua_State* L)
+{
+	// os.ntime()
+	lua_pushinteger(L, OTSYS_NANOTIME());
+	return 1;
+}
+
+// table
+int LuaScriptInterface::luaTableCreate(lua_State* L)
+{
+	// table.create(arrayLength, keyLength)
+	lua_createtable(L, Lua::getInteger<int32_t>(L, 1), Lua::getInteger<int32_t>(L, 2));
+	return 1;
+}
+
+//
+LuaEnvironment::LuaEnvironment() : LuaScriptInterface("Main Interface") {}
+
+LuaEnvironment::~LuaEnvironment()
+{
+	testInterface.reset();
+	closeState();
+}
+
+bool LuaEnvironment::initState()
+{
+	ownedLuaState_.reset(luaL_newstate());
+	luaState = ownedLuaState_.get();
+	if (!luaState) {
+		return false;
+	}
+
+	luaL_openlibs(luaState);
+
+#if LUA_VERSION_NUM == 505
+	// Lua 5.5.0 shipped with a missing write barrier in luaV_finishset. Fail
+	// fast for an unpatched system library instead of accepting latent heap
+	// corruption. Patched 5.5 builds and later 5.5 maintenance releases pass.
+	constexpr const char* writeBarrierProbe =
+	    "local p={}; p.__newindex=p; collectgarbage(); "
+	    "local c=setmetatable({},p); c.__newindex={x='ok'}; "
+	    "collectgarbage('step'); assert(p.__newindex.x=='ok')";
+	if (luaL_dostring(luaState, writeBarrierProbe) != LUA_OK) {
+		const char* error = lua_tostring(luaState, -1);
+		LOG_ERROR("[LuaEnvironment::initState] Lua 5.5 write-barrier self-test failed: {}",
+		          error ? error : "unknown error");
+		ownedLuaState_.reset();
+		luaState = nullptr;
+		return false;
+	}
+	lua_settop(luaState, 0);
+#endif
+
+	registerFunctions();
+
+	runningEventId = EVENT_ID_USER;
+	return true;
+}
+
+bool LuaEnvironment::reInitState()
+{
+	// TODO: get children, reload children
+	closeState();
+	return initState();
+}
+
+bool LuaEnvironment::closeState()
+{
+	if (!luaState) {
+		return false;
+	}
+
+    // Force full garbage collection before cleanup to release Lua-managed memory
+    lua_gc(luaState, LUA_GCCOLLECT, 0);
+    lua_gc(luaState, LUA_GCCOLLECT, 0); 
+
+	for (const auto& combatEntry : combatIdMap) {
+		clearCombatObjects(combatEntry.first);
+	}
+
+	for (const auto& areaEntry : areaIdMap) {
+		clearAreaObjects(areaEntry.first);
+	}
+
+	for (auto& timerEntry : timerEvents) {
+		LuaTimerEventDesc timerEventDesc = std::move(timerEntry.second);
+		
+		g_scheduler.stopEvent(timerEventDesc.eventId);
+		
+		for (int32_t parameter : timerEventDesc.parameters) {
+			luaL_unref(luaState, LUA_REGISTRYINDEX, parameter);
+		}
+		luaL_unref(luaState, LUA_REGISTRYINDEX, timerEventDesc.function);
+	}
+
+	combatIdMap.clear();
+	areaIdMap.clear();
+	timerEvents.clear();
+	cacheFiles.clear();
+
+    // Release event table reference
+    if (eventTableRef != -1) {
+        luaL_unref(luaState, LUA_REGISTRYINDEX, eventTableRef);
+        eventTableRef = -1;
+    }
+
+	ownedLuaState_.reset(); // lua_close via deleter
+	luaState = nullptr;
+	return true;
+}
+
+LuaScriptInterface* LuaEnvironment::getTestInterface()
+{
+	if (!testInterface) {
+		testInterface = std::make_unique<LuaScriptInterface>("Test Interface");
+		testInterface->initState();
+	}
+	return testInterface.get();
+}
+
+Combat_ptr LuaEnvironment::getCombatObject(uint32_t id) const
+{
+	auto it = combatMap.find(id);
+	if (it == combatMap.end()) {
+		return nullptr;
+	}
+	return it->second;
+}
+
+Combat_ptr LuaEnvironment::createCombatObject(LuaScriptInterface* interface)
+{
+	Combat_ptr combat = std::make_shared<Combat>();
+	combatMap[++lastCombatId] = combat;
+	combatIdMap[interface].push_back(lastCombatId);
+	return combat;
+}
+
+void LuaEnvironment::clearCombatObjects(LuaScriptInterface* interface)
+{
+	auto it = combatIdMap.find(interface);
+	if (it == combatIdMap.end()) {
+		return;
+	}
+
+	for (uint32_t id : it->second) {
+		auto itt = combatMap.find(id);
+		if (itt != combatMap.end()) {
+			combatMap.erase(itt);
+		}
+	}
+	it->second.clear();
+}
+
+AreaCombat* LuaEnvironment::getAreaObject(uint32_t id) const
+{
+	auto it = areaMap.find(id);
+	if (it == areaMap.end()) {
+		return nullptr;
+	}
+	return it->second.get();
+}
+
+uint32_t LuaEnvironment::createAreaObject(LuaScriptInterface* interface)
+{
+	areaMap[++lastAreaId] = std::make_unique<AreaCombat>();
+	areaIdMap[interface].push_back(lastAreaId);
+	return lastAreaId;
+}
+
+void LuaEnvironment::clearAreaObjects(LuaScriptInterface* interface)
+{
+	auto it = areaIdMap.find(interface);
+	if (it == areaIdMap.end()) {
+		return;
+	}
+
+	for (uint32_t id : it->second) {
+		areaMap.erase(id);
+	}
+	it->second.clear();
+}
+
+void LuaEnvironment::executeTimerEvent(uint32_t eventIndex)
+{
+	if (!timerEvents.contains(eventIndex)) {
+		return;
+	}
+
+	LuaTimerEventDesc timerEventDesc = std::move(timerEvents[eventIndex]);
+	timerEvents.erase(eventIndex);
+
+	// Everything below pushes onto the shared Lua stack. Only callVoidFunction()
+	// unwinds those pushes, so remember where the stack started and restore it on
+	// any path that does not reach the call.
+	const int stackBase = lua_gettop(luaState);
+
+	// push function
+	lua_rawgeti(luaState, LUA_REGISTRYINDEX, timerEventDesc.function);
+
+	// push parameters
+	for (auto parameter : std::views::reverse(timerEventDesc.parameters)) {
+		lua_rawgeti(luaState, LUA_REGISTRYINDEX, parameter);
+		const int parameterStackTop = lua_gettop(luaState);
+		if (lua_getmetatable(luaState, -1) == 0) {
+			continue;
+		}
+
+		lua_rawgeti(luaState, -1, 't');
+		auto type = Lua::getInteger<LuaDataType>(luaState, -1);
+		lua_pop(luaState, 2);
+
+		switch (type) {
+			case LuaData_Player:
+			case LuaData_Monster:
+			case LuaData_Npc: {
+				auto replaceCreatureParameter = [this](uint32_t creatureId) {
+					if (auto creature = g_game.getCreatureByIDShared(creatureId)) {
+						Lua::pushUserdata<Creature>(luaState, creature.get());
+						Lua::setCreatureMetatable(luaState, -1, creature.get());
+					} else {
+						lua_pushnil(luaState);
+					}
+
+					lua_replace(luaState, -2);
+				};
+
+				int userValueType = lua_getiuservalue(luaState, -1, 2);
+				if (userValueType == LUA_TNUMBER) {
+					auto creatureId = Lua::getInteger<uint32_t>(luaState, -1);
+					lua_pop(luaState, 1);
+					replaceCreatureParameter(creatureId);
+					break;
+				}
+				if (userValueType != LUA_TNONE) {
+					lua_pop(luaState, 1);
+				}
+
+				userValueType = lua_getiuservalue(luaState, -1, 1);
+				if (userValueType == LUA_TNUMBER) {
+					auto creatureId = Lua::getInteger<uint32_t>(luaState, -1);
+					lua_pop(luaState, 1);
+					replaceCreatureParameter(creatureId);
+					break;
+				}
+				if (userValueType != LUA_TNONE) {
+					lua_pop(luaState, 1);
+				}
+
+				if (!Lua::getValidatedCreatureUserdata(luaState, -1)) {
+					lua_pushnil(luaState);
+					lua_replace(luaState, -2);
+				}
+
+				break;
+			}
+
+			case LuaData_Item:
+			case LuaData_Container:
+			case LuaData_Teleport: {
+				auto& itemPtr = Lua::getSharedPtr<Item>(luaState, -1);
+				if (!itemPtr || itemPtr->isRemoved()) {
+					lua_pushnil(luaState);
+					lua_replace(luaState, -2);
+				}
+				break;
+			}
+
+			default: {
+				break;
+			}
+		}
+		lua_settop(luaState, parameterStackTop);
+	}
+
+	// call the function
+	if (reserveScriptEnv()) {
+		ScriptEnvironment* env = getScriptEnv();
+		env->setTimerEvent(timerEventDesc.origin);
+		env->setScriptId(timerEventDesc.scriptId, this);
+		callVoidFunction(timerEventDesc.parameters.size());
+	} else {
+		LOG_ERROR("[Error - LuaScriptInterface::executeTimerEvent] Call stack overflow");
+		// The function and its parameters are already on the stack but nothing will
+		// consume them now, so drop them here. Without this every timer event that
+		// fails to reserve leaks 1+N stack slots for the lifetime of the state.
+		lua_settop(luaState, stackBase);
+	}
+
+	// free resources
+	luaL_unref(luaState, LUA_REGISTRYINDEX, timerEventDesc.function);
+	for (auto parameter : timerEventDesc.parameters) {
+		luaL_unref(luaState, LUA_REGISTRYINDEX, parameter);
+	}
+}
+
+void LuaScriptInterface::registerKV() {
+	// Global kv table
+	registerTable("kv");
+	registerMethod("kv", "scoped", LuaScriptInterface::luaKVScoped);
+	registerMethod("kv", "set", LuaScriptInterface::luaKVSet);
+	registerMethod("kv", "get", LuaScriptInterface::luaKVGet);
+	registerMethod("kv", "keys", LuaScriptInterface::luaKVKeys);
+	registerMethod("kv", "remove", LuaScriptInterface::luaKVRemove);
+
+	// KV metatable for scoped userdata
+	registerClass("KV", "", nullptr);
+	registerMetaMethod("KV", "__gc", LuaScriptInterface::luaSharedPtrGC<KV>);
+	registerMethod("KV", "scoped", LuaScriptInterface::luaKVScoped);
+	registerMethod("KV", "set", LuaScriptInterface::luaKVSet);
+	registerMethod("KV", "get", LuaScriptInterface::luaKVGet);
+	registerMethod("KV", "keys", LuaScriptInterface::luaKVKeys);
+	registerMethod("KV", "remove", LuaScriptInterface::luaKVRemove);
+}
+
+void LuaScriptInterface::registerStressReactor()
+{
+	lua_register(luaState, "stressReactor", [](lua_State*) {
+		runStressTests();
+		return 0;
+	});
+
+	// Boolean config keys
+	registerVariable("configKeys", "STRESS_TEST", static_cast<int64_t>(ConfigManager::STRESS_TEST));
+	registerVariable("configKeys", "STRESS_TEST_SEND", static_cast<int64_t>(ConfigManager::STRESS_TEST_SEND));
+	registerVariable("configKeys", "STRESS_TEST_SCHEDULE", static_cast<int64_t>(ConfigManager::STRESS_TEST_SCHEDULE));
+	registerVariable("configKeys", "STRESS_TEST_STAGGERED", static_cast<int64_t>(ConfigManager::STRESS_TEST_STAGGERED));
+	registerVariable("configKeys", "STRESS_TEST_MIXED", static_cast<int64_t>(ConfigManager::STRESS_TEST_MIXED));
+	registerVariable("configKeys", "STRESS_TEST_CANCEL", static_cast<int64_t>(ConfigManager::STRESS_TEST_CANCEL));
+	registerVariable("configKeys", "STRESS_TEST_CONCURRENT_PUSH", static_cast<int64_t>(ConfigManager::STRESS_TEST_CONCURRENT_PUSH));
+	registerVariable("configKeys", "STRESS_TEST_CONCURRENT_SCHEDULE", static_cast<int64_t>(ConfigManager::STRESS_TEST_CONCURRENT_SCHEDULE));
+	registerVariable("configKeys", "STRESS_TEST_HEAP_ORDER", static_cast<int64_t>(ConfigManager::STRESS_TEST_HEAP_ORDER));
+	registerVariable("configKeys", "STRESS_TEST_UNIQUE_IDS", static_cast<int64_t>(ConfigManager::STRESS_TEST_UNIQUE_IDS));
+	registerVariable("configKeys", "STRESS_TEST_MOVE_ONLY", static_cast<int64_t>(ConfigManager::STRESS_TEST_MOVE_ONLY));
+	registerVariable("configKeys", "STRESS_TEST_EXPIRATION", static_cast<int64_t>(ConfigManager::STRESS_TEST_EXPIRATION));
+	registerVariable("configKeys", "STRESS_TEST_BURST", static_cast<int64_t>(ConfigManager::STRESS_TEST_BURST));
+	registerVariable("configKeys", "STRESS_TEST_REENTRANCY", static_cast<int64_t>(ConfigManager::STRESS_TEST_REENTRANCY));
+	registerVariable("configKeys", "STRESS_TEST_SHUTDOWN_PENDING", static_cast<int64_t>(ConfigManager::STRESS_TEST_SHUTDOWN_PENDING));
+	registerVariable("configKeys", "STRESS_TEST_CANCEL_EXTERNAL", static_cast<int64_t>(ConfigManager::STRESS_TEST_CANCEL_EXTERNAL));
+	registerVariable("configKeys", "STRESS_TEST_EXCEPTION", static_cast<int64_t>(ConfigManager::STRESS_TEST_EXCEPTION));
+	registerVariable("configKeys", "STRESS_TEST_BENCHMARK", static_cast<int64_t>(ConfigManager::STRESS_TEST_BENCHMARK));
+	registerVariable("configKeys", "STRESS_TEST_INSPECTION", static_cast<int64_t>(ConfigManager::STRESS_TEST_INSPECTION));
+	registerVariable("configKeys", "STRESS_TEST_MIXED_DELAYS", static_cast<int64_t>(ConfigManager::STRESS_TEST_MIXED_DELAYS));
+	registerVariable("configKeys", "STRESS_TEST_LEAK", static_cast<int64_t>(ConfigManager::STRESS_TEST_LEAK));
+	registerVariable("configKeys", "STRESS_TEST_SHUTDOWN_SEND", static_cast<int64_t>(ConfigManager::STRESS_TEST_SHUTDOWN_SEND));
+
+	// Integer config keys
+	registerVariable("configKeys", "STRESS_TEST_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_COUNT));
+	registerVariable("configKeys", "STRESS_TEST_THREADS", static_cast<int64_t>(ConfigManager::STRESS_TEST_THREADS));
+	registerVariable("configKeys", "STRESS_TEST_SEND_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_SEND_COUNT));
+	registerVariable("configKeys", "STRESS_TEST_SCHEDULE_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_SCHEDULE_COUNT));
+	registerVariable("configKeys", "STRESS_TEST_STAGGERED_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_STAGGERED_COUNT));
+	registerVariable("configKeys", "STRESS_TEST_MIXED_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_MIXED_COUNT));
+	registerVariable("configKeys", "STRESS_TEST_CANCEL_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_CANCEL_COUNT));
+	registerVariable("configKeys", "STRESS_TEST_CONCURRENT_PUSH_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_CONCURRENT_PUSH_COUNT));
+	registerVariable("configKeys", "STRESS_TEST_CONCURRENT_SCHEDULE_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_CONCURRENT_SCHEDULE_COUNT));
+	registerVariable("configKeys", "STRESS_TEST_HEAP_ORDER_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_HEAP_ORDER_COUNT));
+	registerVariable("configKeys", "STRESS_TEST_UNIQUE_IDS_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_UNIQUE_IDS_COUNT));
+	registerVariable("configKeys", "STRESS_TEST_MOVE_ONLY_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_MOVE_ONLY_COUNT));
+	registerVariable("configKeys", "STRESS_TEST_EXPIRATION_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_EXPIRATION_COUNT));
+	registerVariable("configKeys", "STRESS_TEST_BURST_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_BURST_COUNT));
+	registerVariable("configKeys", "STRESS_TEST_CONCURRENT_PUSH_THREADS", static_cast<int64_t>(ConfigManager::STRESS_TEST_CONCURRENT_PUSH_THREADS));
+	registerVariable("configKeys", "STRESS_TEST_CONCURRENT_SCHEDULE_THREADS", static_cast<int64_t>(ConfigManager::STRESS_TEST_CONCURRENT_SCHEDULE_THREADS));
+	registerVariable("configKeys", "STRESS_TEST_UNIQUE_IDS_THREADS", static_cast<int64_t>(ConfigManager::STRESS_TEST_UNIQUE_IDS_THREADS));
+	registerVariable("configKeys", "STRESS_TEST_REENTRANCY_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_REENTRANCY_COUNT));
+	registerVariable("configKeys", "STRESS_TEST_SHUTDOWN_PENDING_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_SHUTDOWN_PENDING_COUNT));
+	registerVariable("configKeys", "STRESS_TEST_CANCEL_EXTERNAL_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_CANCEL_EXTERNAL_COUNT));
+	registerVariable("configKeys", "STRESS_TEST_CANCEL_EXTERNAL_THREADS", static_cast<int64_t>(ConfigManager::STRESS_TEST_CANCEL_EXTERNAL_THREADS));
+	registerVariable("configKeys", "STRESS_TEST_EXCEPTION_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_EXCEPTION_COUNT));
+	registerVariable("configKeys", "STRESS_TEST_INSPECTION_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_INSPECTION_COUNT));
+	registerVariable("configKeys", "STRESS_TEST_MIXED_DELAYS_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_MIXED_DELAYS_COUNT));
+	registerVariable("configKeys", "STRESS_TEST_LEAK_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_LEAK_COUNT));
+	registerVariable("configKeys", "STRESS_TEST_SHUTDOWN_SEND_COUNT", static_cast<int64_t>(ConfigManager::STRESS_TEST_SHUTDOWN_SEND_COUNT));
+}
+
+int LuaScriptInterface::luaKVScoped(lua_State* L) {
+	// kv.scoped(key) or scopedKV:scoped(key)
+	auto* ptr = getKVUserdata(L, "KV:scoped");
+	const auto key = Lua::getString(L, ptr ? 2 : 1);
+
+	if (ptr) {
+		auto newScope = (*ptr)->scoped(key);
+		Lua::pushSharedPtr(L, newScope);
+		Lua::setMetatable(L, -1, "KV");
+		return 1;
+	}
+
+	auto newScope = KVStore::getInstance().scoped(key);
+	Lua::pushSharedPtr(L, newScope);
+	Lua::setMetatable(L, -1, "KV");
+	return 1;
+}
+
+int LuaScriptInterface::luaKVSet(lua_State* L) {
+	// kv.set(key, value) or scopedKV:set(key, value)
+	auto* ptr = getKVUserdata(L, "KV:set");
+	const int32_t keyIndex = ptr ? 2 : 1;
+	const int32_t valueIndex = ptr ? 3 : 2;
+	if (lua_gettop(L) < valueIndex || !Lua::isString(L, keyIndex)) {
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	auto value = getKVValueFromLua(L, valueIndex);
+	if (!value) {
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+
+	const auto key = Lua::getString(L, keyIndex);
+	if (ptr) {
+		(*ptr)->set(key, *value);
+	} else {
+		KVStore::getInstance().set(key, *value);
+	}
+	Lua::pushBoolean(L, true);
+	return 1;
+}
+
+int LuaScriptInterface::luaKVGet(lua_State* L) {
+	// kv.get(key[, forceLoad]) or scopedKV:get(key[, forceLoad])
+	auto* ptr = getKVUserdata(L, "KV:get");
+	const int32_t keyIndex = ptr ? 2 : 1;
+	const int32_t forceLoadIndex = keyIndex + 1;
+	bool forceLoad = false;
+	if (lua_gettop(L) >= forceLoadIndex && Lua::isBoolean(L, forceLoadIndex)) {
+		forceLoad = Lua::getBoolean(L, forceLoadIndex);
+	}
+
+	const auto key = Lua::getString(L, keyIndex);
+	std::optional<ValueWrapper> valueWrapper;
+	if (ptr) {
+		valueWrapper = (*ptr)->get(key, forceLoad);
+	} else {
+		valueWrapper = KVStore::getInstance().get(key, forceLoad);
+	}
+
+	if (valueWrapper.has_value()) {
+		pushKVValue(L, *valueWrapper);
+	} else {
+		lua_pushnil(L);
+	}
+	return 1;
+}
+
+int LuaScriptInterface::luaKVRemove(lua_State* L) {
+	// kv.remove(key) or scopedKV:remove(key)
+	auto* ptr = getKVUserdata(L, "KV:remove");
+	const auto key = Lua::getString(L, ptr ? 2 : 1);
+	if (ptr) {
+		(*ptr)->remove(key);
+	} else {
+		KVStore::getInstance().remove(key);
+	}
+	lua_pushnil(L);
+	return 1;
+}
+
+int LuaScriptInterface::luaKVKeys(lua_State* L) {
+	// kv.keys([prefix]) or scopedKV:keys([prefix])
+	std::unordered_set<std::string> keys;
+	std::string prefix;
+	auto* ptr = getKVUserdata(L, "KV:keys");
+	const int32_t prefixIndex = ptr ? 2 : 1;
+
+	if (lua_gettop(L) >= prefixIndex && Lua::isString(L, prefixIndex)) {
+		prefix = Lua::getString(L, prefixIndex);
+	}
+
+	if (ptr) {
+		keys = (*ptr)->keys(prefix);
+	} else {
+		keys = KVStore::getInstance().keys(prefix);
+	}
+
+	int index = 0;
+	lua_createtable(L, static_cast<int>(keys.size()), 0);
+	for (const auto &key : keys) {
+		Lua::pushString(L, key);
+		lua_rawseti(L, -2, ++index);
+	}
+	return 1;
+}

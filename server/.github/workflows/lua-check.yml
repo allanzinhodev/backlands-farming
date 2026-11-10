@@ -1,0 +1,154 @@
+name: Lua syntax check, lint, and format
+
+on:
+  push:
+    branches:
+      - main
+      - "v*"
+    paths:
+      - ".github/workflows/lua-check.yml"
+      - ".github/tests/npc_travel_keywords.lua"
+      - ".github/tests/market_save_regressions.lua"
+      - ".github/tests/npc_conversation_timeout.lua"
+      - ".github/tests/bestiary_kill_cache.lua"
+      - "config.lua.dist"
+      - "data/**/*.lua"
+
+  pull_request:
+    branches:
+      - main
+      - "v*"
+    paths:
+      - ".github/workflows/lua-check.yml"
+      - ".github/tests/npc_travel_keywords.lua"
+      - ".github/tests/market_save_regressions.lua"
+      - ".github/tests/npc_conversation_timeout.lua"
+      - ".github/tests/bestiary_kill_cache.lua"
+      - "config.lua.dist"
+      - "data/**/*.lua"
+
+  workflow_dispatch:
+
+concurrency:
+  group: lua-check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  luac:
+    name: Lua syntax check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install Lua
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4
+
+      - name: Test Lua syntax
+        run: |
+          luac5.4 -p config.lua.dist
+          find data/ -type f -name '*.lua' -print0 | xargs -0 -r -n1 luac5.4 -p
+
+      - name: Test Market payment and single scheduled save
+        run: lua5.4 .github/tests/market_save_regressions.lua
+
+      - name: Test NPC travel keyword and equipped-item policy
+        run: |
+          lua5.4 .github/tests/npc_travel_keywords.lua \
+            data/npc/lib/revnpcsys/handler.lua \
+            data/npc/lib/revnpcsys/requirements.lua \
+            data/npc/lib/revnpcsys/modules.lua
+
+      - name: Test Bestiary kill cache recovery
+        run: lua5.4 .github/tests/bestiary_kill_cache.lua
+
+      - name: Test NPC conversation timeout signaling
+        run: |
+          lua5.4 .github/tests/npc_conversation_timeout.lua \
+            data/lib/functions/astra_helper.lua \
+            data/npc/lib/npcsystem/npchandler.lua \
+            data/npc/lib/revnpcsys/focus.lua \
+            data/npc/lib/revnpcsys/events.lua
+
+  lint:
+    name: Lua lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [luac]
+    continue-on-error: true
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install Luacheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4 luarocks
+          sudo luarocks install luacheck
+
+      - name: Run Luacheck
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+        run: |
+          mapfile -d '' files < <(
+            git diff --name-only --diff-filter=ACMR -z "$BASE_SHA" HEAD -- config.lua.dist data/ |
+              grep -zE '(^config\.lua\.dist$|\.lua$)' || true
+          )
+          if ((${#files[@]})); then
+            printf '%s\0' "${files[@]}" | xargs -0 -r luacheck || true
+          fi
+
+  format:
+    name: Lua format check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [luac]
+    continue-on-error: true
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install LuaFormatter
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4 luarocks cmake g++
+          sudo luarocks install --server=https://luarocks.org/dev luaformatter
+
+      - name: Check Lua formatting
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+        run: |
+          mapfile -d '' files < <(
+            git diff --name-only --diff-filter=ACMR -z "$BASE_SHA" HEAD -- data/ |
+              grep -zE '\.lua$' || true
+          )
+          if ((${#files[@]})); then
+            printf '%s\0' "${files[@]}" | xargs -0 -r -n1 lua-format -i
+          fi
+          if ! git diff --quiet --exit-code; then
+            echo "Lua formatting mismatches detected. Run the formatter locally and commit the changes when you want to enforce formatting:"
+            echo "  find data/ -type f -name '*.lua' -print0 | xargs -0 -r -n1 lua-format -i"
+            echo "Changed files:"
+            git diff --name-only
+          fi

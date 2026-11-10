@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<smartPointerStress>
+	<node name="owned-userdata" value="ok">
+		<child name="first"/>
+		<child name="second"/>
+	</node>
+</smartPointerStress>

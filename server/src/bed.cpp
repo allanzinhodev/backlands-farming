@@ -1,0 +1,402 @@
+// Copyright 2023 The Forgotten Server Authors. All rights reserved.
+// Use of this source code is governed by the GPL-2.0 License that can be found in the LICENSE file.
+
+#include "otpch.h"
+
+#include "bed.h"
+
+#include "game.h"
+#include "house.h"
+#include "iologindata.h"
+#include "save_manager.h"
+#include "scheduler.h"
+#include "tasks.h"
+
+#include <unordered_set>
+
+using namespace std::chrono;
+
+extern Game g_game;
+
+static constexpr uint32_t REGEN_INTERVAL_SECONDS = 30;
+static constexpr uint32_t REGEN_TICKS_PER_INTERVAL = 30000;
+static constexpr uint32_t SOUL_REGEN_INTERVAL_SECONDS = 60 * 15;
+
+BedItem::BedItem(uint16_t id) : Item(id) { internalRemoveSleeper(); }
+
+void BedItem::setHouse(const std::shared_ptr<House>& h) noexcept
+{
+	if (auto current = house.lock()) {
+		if (current != h) {
+			current->removeBed(this);
+		}
+	}
+	house = h;
+}
+
+void BedItem::onRemoved()
+{
+	Item::onRemoved();
+	setHouse(nullptr);
+}
+
+Attr_ReadValue BedItem::readAttr(AttrTypes_t attr, PropStream& propStream)
+{
+	switch (attr) {
+		case ATTR_SLEEPERGUID: {
+			uint32_t guid;
+			if (!propStream.read<uint32_t>(guid)) {
+				return ATTR_READ_ERROR;
+			}
+
+			if (guid != 0) {
+				if (auto name = IOLoginData::getNameByGuid(guid); !name.empty()) {
+					setSpecialDescription(fmt::format("{} is sleeping there.", name));
+					g_game.setBedSleeper(this, guid);
+					sleeperGUID = guid;
+				}
+			}
+			return ATTR_READ_CONTINUE;
+		}
+
+		case ATTR_SLEEPSTART: {
+			uint32_t sleep_start;
+			if (!propStream.read<uint32_t>(sleep_start)) {
+				return ATTR_READ_ERROR;
+			}
+
+			sleepStart = static_cast<uint64_t>(sleep_start);
+			return ATTR_READ_CONTINUE;
+		}
+
+		default:
+			break;
+	}
+	return Item::readAttr(attr, propStream);
+}
+
+void BedItem::serializeAttr(PropWriteStream& propWriteStream) const
+{
+	if (sleeperGUID != 0) {
+		propWriteStream.write<uint8_t>(ATTR_SLEEPERGUID);
+		propWriteStream.write<uint32_t>(sleeperGUID);
+	}
+
+	if (sleepStart != 0) {
+		propWriteStream.write<uint8_t>(ATTR_SLEEPSTART);
+		// FIXME: should be stored as 64-bit, but we need to retain backwards compatibility
+		propWriteStream.write<uint32_t>(static_cast<uint32_t>(sleepStart));
+	}
+}
+
+std::shared_ptr<BedItem> BedItem::getNextBedItem() const
+{
+	const auto dir = Item::items[id].bedPartnerDir;
+	const auto targetPos = getNextPosition(dir, getPosition());
+
+	auto* tile = g_game.map.getTile(targetPos);
+	if (!tile) {
+		return nullptr;
+	}
+	return tile->getBedItem();
+}
+
+bool BedItem::canUse(Player* player)
+{
+	if (!player || !player->isPremium() || player->getZone() != ZONE_PROTECTION) {
+		return false;
+	}
+
+	auto h = getHouse();
+	if (!h) {
+		return false;
+	}
+
+	if (sleeperGUID == 0) {
+		return true;
+	}
+
+	if (h->getHouseAccessLevel(player) == HOUSE_OWNER) {
+		return true;
+	}
+
+	Player sleeper(nullptr);
+	if (!IOLoginData::loadPlayerById(&sleeper, sleeperGUID)) {
+		return false;
+	}
+
+	return h->getHouseAccessLevel(&sleeper) <= h->getHouseAccessLevel(player);
+}
+
+bool BedItem::trySleep(Player* player)
+{
+	if (player->isRemoved()) {
+		return false;
+	}
+
+	auto h = getHouse();
+	if (!h) {
+		return false;
+	}
+
+	if (sleeperGUID != 0) {
+		const auto& itemType = Item::items[id];
+		if (itemType.transformToFree != 0 && h->getOwner() == player->getGUID()) {
+			wakeUp(nullptr);
+		}
+
+		g_game.addMagicEffect(player->getPosition(), CONST_ME_POFF, player->getInstanceID());
+		return false;
+	}
+	return true;
+}
+
+bool BedItem::sleep(Player* player)
+{
+	if (house.expired() || sleeperGUID != 0) {
+		return false;
+	}
+
+	auto nextBedItem = getNextBedItem();
+
+	internalSetSleeper(player);
+
+	if (nextBedItem) {
+		nextBedItem->internalSetSleeper(player);
+	}
+
+	// update the bedSleepersMap
+	g_game.setBedSleeper(this, player->getGUID());
+
+	// make the player walk onto the bed
+	g_game.map.moveCreature(*player, *getTile());
+
+	// display 'Zzzz'/sleep effect
+	g_game.addMagicEffect(player->getPosition(), CONST_ME_SLEEP, player->getInstanceID());
+
+	// kick player after he sees himself walk onto the bed and it change id
+	g_scheduler.addEvent(createSchedulerTask(MIN_TASK_INTERVAL,
+	                                         [playerID = player->getID()]() { g_game.kickPlayer(playerID, false); }));
+
+	// change self and partner's appearance
+	updateAppearance(player);
+
+	if (nextBedItem) {
+		nextBedItem->updateAppearance(player);
+	}
+
+	return true;
+}
+
+bool BedItem::wakeUp(Player* player)
+{
+	if (sleeperGUID != 0) {
+		if (!player) {
+			Player regenPlayer(nullptr);
+			if (!loadOfflineSleeper(&regenPlayer, sleeperGUID)) {
+				return false;
+			}
+			regeneratePlayer(&regenPlayer, sleepStart);
+			if (!saveOfflineSleepers({&regenPlayer})) {
+				return false;
+			}
+		} else {
+			regeneratePlayer(player, sleepStart);
+			g_game.addCreatureHealth(player);
+		}
+	}
+
+	// update the bedSleepersMap
+	g_game.removeBedSleeper(sleeperGUID);
+
+	auto nextBedItem = getNextBedItem();
+
+	// unset sleep info
+	internalRemoveSleeper();
+
+	if (nextBedItem) {
+		nextBedItem->internalRemoveSleeper();
+	}
+
+	// change self and partner's appearance
+	updateAppearance(nullptr);
+
+	if (nextBedItem) {
+		nextBedItem->updateAppearance(nullptr);
+	}
+	return true;
+}
+
+bool BedItem::wakeUpAll(const std::vector<std::shared_ptr<BedItem>>& beds)
+{
+	struct WakeSession {
+		std::shared_ptr<Player> player;
+		uint32_t guid;
+		uint64_t sleepStart;
+		bool offline;
+	};
+	std::vector<WakeSession> sessions;
+	std::vector<std::pair<std::shared_ptr<BedItem>, uint32_t>> bedsToClear;
+	std::unordered_set<uint32_t> sleeperGuids;
+	std::unordered_set<BedItem*> seenBeds;
+	std::vector<Player*> offlinePlayers;
+	std::shared_ptr<BedItem> offlineWriter;
+	auto collectBed = [&](const std::shared_ptr<BedItem>& bed, uint32_t guid) {
+		if (bed && bed->getSleeper() == guid && seenBeds.insert(bed.get()).second) {
+			bedsToClear.emplace_back(bed, guid);
+		}
+	};
+
+	// Preparing temporary offline players must not change a live player, bed,
+	// registry entry or appearance. Either all loads succeed, or nothing wakes.
+	for (const auto& bed : beds) {
+		if (!bed || bed->isRemoved() || bed->getSleeper() == 0) {
+			continue;
+		}
+		const uint32_t guid = bed->getSleeper();
+		collectBed(bed, guid);
+		collectBed(bed->getNextBedItem(), guid);
+		if (!sleeperGuids.insert(guid).second) {
+			continue;
+		}
+		auto player = g_game.getPlayerByGUID(guid);
+		const bool offline = !player;
+		if (offline) {
+			player = std::make_shared<Player>(nullptr);
+			if (!bed->loadOfflineSleeper(player.get(), guid)) {
+				return false;
+			}
+			regeneratePlayer(player.get(), bed->sleepStart);
+			offlinePlayers.push_back(player.get());
+			if (!offlineWriter) {
+				offlineWriter = bed;
+			}
+		}
+		sessions.push_back({std::move(player), guid, bed->sleepStart, offline});
+	}
+	if (offlineWriter && !offlineWriter->saveOfflineSleepers(offlinePlayers)) {
+		return false;
+	}
+
+	// The batch is committed. Clear every session before any live-player or
+	// appearance notification can reenter map removal or wake another bed.
+	for (const auto& session : sessions) {
+		g_game.removeBedSleeper(session.guid);
+	}
+	for (const auto& [bed, guid] : bedsToClear) {
+		if (bed->getSleeper() == guid) {
+			bed->internalRemoveSleeper();
+		}
+	}
+	for (const auto& session : sessions) {
+		if (!session.offline) {
+			regeneratePlayer(session.player.get(), session.sleepStart);
+			g_game.addCreatureHealth(session.player.get());
+		}
+	}
+	for (const auto& entry : bedsToClear) {
+		const auto& bed = entry.first;
+		if (!bed->isRemoved() && bed->getSleeper() == 0) {
+			bed->updateAppearance(nullptr);
+		}
+	}
+	return true;
+}
+
+bool BedItem::loadOfflineSleeper(Player* player, uint32_t guid) const
+{
+	// On the dispatcher, the pending-flush state cannot change between this
+	// check and saveOfflineSleepers(). Do not load stale state while an older
+	// save is still in flight; the batch save also rejects pending flushes.
+	if (!g_dispatcher.isDispatcherThread() || g_saveManager.hasPendingPlayerSave(guid) ||
+	    g_saveManager.hasFailedRecovery(guid)) {
+		return false;
+	}
+	return IOLoginData::loadPlayerById(player, guid);
+}
+
+bool BedItem::saveOfflineSleepers(const std::vector<Player*>& players) const
+{
+	return g_saveManager.savePlayersSync(players);
+}
+
+void BedItem::regeneratePlayer(Player* player, uint64_t sleepStart)
+{
+	const auto now = system_clock::now();
+	const auto currentTime = static_cast<uint64_t>(
+		duration_cast<seconds>(now.time_since_epoch()).count());
+
+	if (currentTime <= sleepStart) {
+		return;
+	}
+
+	const auto sleptTime = static_cast<uint32_t>(currentTime - sleepStart);
+
+	auto condition = player->getCondition(CONDITION_REGENERATION, CONDITIONID_DEFAULT);
+	if (condition) {
+		uint32_t regen;
+
+		if (condition->getTicks() != -1) {
+			const auto ticksInSeconds = static_cast<uint32_t>(condition->getTicks() / 1000);
+			regen = std::min(ticksInSeconds, sleptTime) / REGEN_INTERVAL_SECONDS;
+
+			const auto newRegenTicks = condition->getTicks() -
+				static_cast<int32_t>(regen * REGEN_TICKS_PER_INTERVAL);
+
+			if (newRegenTicks <= 0) {
+				player->removeCondition(condition);
+			} else {
+				condition->setTicks(newRegenTicks);
+			}
+		} else {
+			regen = sleptTime / REGEN_INTERVAL_SECONDS;
+		}
+
+		player->changeHealth(regen, false);
+		player->changeMana(regen);
+	}
+
+	const int32_t soulRegen = static_cast<int32_t>(
+		sleptTime / SOUL_REGEN_INTERVAL_SECONDS
+	);
+	player->changeSoul(soulRegen);
+}
+
+void BedItem::updateAppearance(const Player* player)
+{
+	const auto& it = Item::items[id];
+	if (it.type == ITEM_TYPE_BED) {
+		if (player && it.transformToOnUse[player->getSex()] != 0) {
+			const auto& newType = Item::items[it.transformToOnUse[player->getSex()]];
+			if (newType.type == ITEM_TYPE_BED) {
+				g_game.transformItem(this, it.transformToOnUse[player->getSex()]);
+			}
+		} else if (it.transformToFree != 0) {
+			const auto& newType = Item::items[it.transformToFree];
+			if (newType.type == ITEM_TYPE_BED) {
+				g_game.transformItem(this, it.transformToFree);
+			}
+		}
+	}
+}
+
+void BedItem::internalSetSleeper(const Player* player)
+{
+	sleeperGUID = player->getGUID();
+	sleepStart = static_cast<uint64_t>(
+		duration_cast<seconds>(system_clock::now().time_since_epoch()).count());
+
+	setSpecialDescription(fmt::format("{} is sleeping there.", player->getName()));
+}
+
+void BedItem::internalRemoveSleeper() noexcept
+{
+	sleeperGUID = 0;
+	sleepStart = 0;
+
+	if (isRemoved() || !getParent()) {
+		return;
+	}
+
+	setSpecialDescription("Nobody is sleeping there.");
+}

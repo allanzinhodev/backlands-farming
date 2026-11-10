@@ -1,0 +1,244 @@
+<p align="center">
+  <img src="docs/assets/tfs-1.8-official-banner.png" alt="TFS 1.8 Downgrade — Protocol 8.60" width="100%" />
+</p>
+
+<div align="center">
+
+[![Discord](https://img.shields.io/discord/1498442075442516120.svg?style=flat-square&logo=discord&label=Discord&color=5865F2)](https://discord.gg/9ne5TZapd)
+[![CI](https://github.com/Mateuzkl/forgottenserver-downgrade-1.8-8.60/actions/workflows/build.yml/badge.svg)](https://github.com/Mateuzkl/forgottenserver-downgrade-1.8-8.60/actions/workflows/build.yml)
+![Repository size](https://img.shields.io/github/repo-size/Mateuzkl/forgottenserver-downgrade-1.8-8.60?style=flat-square)
+[![License](https://img.shields.io/github/license/Mateuzkl/forgottenserver-downgrade-1.8-8.60.svg?style=flat-square)](https://github.com/Mateuzkl/forgottenserver-downgrade-1.8-8.60/blob/main/LICENSE)
+[![Commits](https://img.shields.io/badge/commits-1000%2B-6a0dad?style=flat-square)](https://github.com/Mateuzkl/forgottenserver-downgrade-1.8-8.60/commits)
+[![Wiki](https://img.shields.io/badge/docs-wiki-8b5cf6?style=flat-square&logo=wikipedia&logoColor=white)](https://github.com/Mateuzkl/forgottenserver-downgrade-1.8-8.60/wiki)
+
+<br />
+
+![Engine](https://img.shields.io/badge/ENGINE-TFS%201.8-7c3aed?style=for-the-badge)
+![Protocol](https://img.shields.io/badge/PROTOCOL-8.60-f97316?style=for-the-badge)
+![C++](https://img.shields.io/badge/C++-23-00599C?style=for-the-badge&logo=cplusplus&logoColor=white)
+![Lua](https://img.shields.io/badge/Lua-5.5-2C2D72?style=for-the-badge&logo=lua&logoColor=white)
+![MariaDB](https://img.shields.io/badge/MariaDB-003545?style=for-the-badge&logo=mariadb&logoColor=white)
+![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04%20%7C%2024.04%20%7C%2026.04-E95420?style=for-the-badge&logo=ubuntu&logoColor=white)
+![Debian](https://img.shields.io/badge/Debian-11%20%7C%2012%20%7C%2013-A81D33?style=for-the-badge&logo=debian&logoColor=white)
+![Windows](https://img.shields.io/badge/Windows-vcpkg-0078D4?style=for-the-badge&logo=windows&logoColor=white)
+
+<br />
+<br />
+
+**TFS 1.8 Downgrade** brings the classic Tibia **8.60** protocol to a modern, optimized server engine, with native ClientID support and a large set of custom systems.
+
+Developed and maintained by [Mateuzkl](https://github.com/Mateuzkl), based on [Nekiro's TFS 1.5 Downgrades](https://github.com/nekiro/TFS-1.5-Downgrades) and forked from [MillhioreBT's downgrade](https://github.com/MillhioreBT/forgottenserver-downgrade).
+
+[Discord Community](https://discord.gg/9ne5TZapd) · [Full Wiki](https://github.com/Mateuzkl/forgottenserver-downgrade-1.8-8.60/wiki) · [Issues](https://github.com/Mateuzkl/forgottenserver-downgrade-1.8-8.60/issues)
+
+</div>
+
+---
+
+# 🚨 IMPORTANT — CLEAN BASE / CONTENT NOT INCLUDED 🚨
+
+![Clean Base](https://img.shields.io/badge/BASE-CLEAN%20ENGINE-red?style=for-the-badge)
+![Content](https://img.shields.io/badge/GLOBAL%20CONTENT-NOT%20INCLUDED-red?style=for-the-badge)
+
+> ## ⚠️ PLEASE READ BEFORE USING THIS PROJECT
+>
+> This repository is a **clean TFS 1.8-based server engine for protocol 8.60**. It is **not** a complete Global/Canary/Crystal datapack and it is **not intended to ship every quest, hunting area, boss, mechanic, script, map, or gameplay system from newer Tibia versions**.
+>
+> The project provides the **server core, protocol support, ClientID-native item/map compatibility, optional engine features, libraries, and selected systems**. Content that belongs to a specific datapack or world must be added separately.
+>
+> If you want to use content from **Crystal Server, Canary, Global maps, custom datapacks, Baiak, or another project**, you are responsible for **porting and adapting that content to this TFS base**. This may include maps, quests, monsters, NPCs, actions, movements, events, bosses, hunting areas, mechanics, scripts, configuration, and any related database changes.
+>
+> This is the same general concept as starting from a clean **TFS 1.4.2, Nekiro downgrade, or other engine-focused distribution**: the engine is the foundation, while the final datapack and game content are built or ported by the server owner.
+>
+> **Enabling an optional feature in `config.lua` does not automatically import the complete official content associated with that feature.** A feature flag enables the server-side support that exists in this project; any missing world content, quest logic, NPCs, monsters, maps, assets, or supplementary scripts still need to be ported separately when required.
+>
+> **In short:** if you want a full Crystal/Canary/Global experience, **port the required content to this TFS base**. The goal of this repository is to provide a clean, modern, extensible 8.60 foundation—not a prebuilt full global datapack.
+
+---
+
+## Highlights
+
+| Area | Features |
+|---|---|
+| Core | TFS 1.8 engine, protocol 8.60, C++23, Lua 5.5, MariaDB, optimized decay |
+| Maps | ClientID-native maps and items |
+| Clients | OTCv8, Mehah, CipSoft, and custom client options |
+| Tooling | Automatic Ubuntu/Debian/WSL build and Windows support through vcpkg |
+
+---
+
+## Map Editor
+
+Use the ClientID-compatible map editor for this source:
+
+**[Download NexaMap Editor](https://github.com/Mateuzkl/NexaMap-Editor)**
+
+---
+
+## Optional Systems
+
+Optional systems are listed in `config.lua.dist` and controlled individually in `config.lua`. Set a system to `true` to enable it or `false` to disable it, choosing only the features that fit your server.
+
+- For a classic 8.60 experience, keep most optional systems set to `false`.
+- For a modern or 15.x-inspired experience, set the systems you want to `true`.
+- You can freely mix `true` and `false` to create your own feature set. The server protocol remains 8.60.
+
+Most optional systems are disabled by default so new installations start with behavior closer to classic 8.60.
+
+<details>
+<summary><strong>View optional systems and config keys</strong></summary>
+
+| System | Config key |
+|---|---|
+| Forge | `forgeSystemEnabled` |
+| Imbuements | `imbuementSystemEnabled` |
+| Monk Vocation | `monkVocationEnabled` |
+| Familiars | `familiarSystemEnabled` |
+| Wheel of Destiny | `wheelSystemEnabled` |
+| Bestiary | `bestiarySystemEnabled` |
+| Market | `marketSystemEnabled` |
+| Prey | `preySystemEnabled` |
+| Battle Pass | `battlePassSystemEnabled` |
+| Weapon Proficiency | `weaponProficiencySystemEnabled` |
+| Augments | `augmentSystemEnabled` |
+| Monster Levels | `monsterLevelEnabled` |
+| Monster Factions | `monsterFactionSystem` |
+| Character Bazaar | `characterBazaarEnabled` |
+| Task Hunting / Task Board | `taskHuntingSystemEnabled` |
+| Bounty Tasks | `bountyTasksEnabled` |
+| Weekly Tasks | `weeklyTasksEnabled` |
+| Soulpit | `soulpitSystemEnabled` |
+| Soulseals | `soulsealsSystemEnabled` |
+
+Choose `true` or `false` for each key in `config.lua`. Bounty and Weekly Tasks require Task Hunting; Soulseals require Weekly Tasks or another configured source.
+
+</details>
+
+### NPC System
+
+Two ready-to-use NPC systems are included. Select one with the `npcSystem` key in `config.lua`:
+
+| Value | NPC system |
+|---|---|
+| `"tfs"` | Default. Uses the standard TFS Lua/RevScript NPC libraries and NPCs from `data/npc/lua`. |
+| `"crystal"` | Uses the included Crystal Server 15.25 Lua/RevScript NPC libraries and NPC pack. |
+
+The default configuration is:
+
+```lua
+npcSystem = "tfs"
+```
+
+To use the Crystal Server NPCs, change only this value and restart the server:
+
+```lua
+npcSystem = "crystal"
+```
+
+Both Lua/RevScript NPC backends and their folders are already configured. An unknown value automatically falls back to `"tfs"`.
+
+---
+
+## Compilation
+
+### Linux / WSL — Ubuntu & Debian
+
+Supported distributions:
+
+- **Ubuntu:** 22.04, 24.04, 26.04
+- **Debian:** 11 (Bullseye), 12 (Bookworm), 13 (Trixie)
+
+Run:
+
+```bash
+chmod +x build.sh
+./build.sh
+```
+
+The build script automatically detects the supported Linux distribution and version, installs the required dependencies, and builds the server in Release mode. The same workflow can be used on native Linux or WSL.
+
+After the build finishes:
+
+```bash
+./tfs
+```
+
+### Windows
+
+Use the latest version of [vcpkg](https://github.com/microsoft/vcpkg):
+
+```powershell
+git clone https://github.com/microsoft/vcpkg.git
+cd vcpkg
+.\bootstrap-vcpkg.bat
+.\vcpkg.exe integrate install
+```
+
+| Visual Studio | Platform toolset |
+|---|---|
+| Visual Studio 2026 | `v145` (project default) |
+| Visual Studio 2022 | `v143` (retarget the project before building) |
+
+Open `vc18/theforgottenserver.sln`, select `Release` and `x64`, then build the solution. Dependencies declared in `vcpkg.json` are downloaded automatically on the first build.
+
+---
+
+## Client Configuration
+
+Read the full client setup guide before changing feature flags:
+
+- English: [`docs/client-configuration.md`](docs/client-configuration.md)
+- PT-BR: [`docs/client-configuration.pt-BR.md`](docs/client-configuration.pt-BR.md)
+
+## Available Clients
+
+Choose the client that matches the experience and feature set you want. They all target protocol 8.60, but use different engines and visual styles.
+
+### OTClient-based
+
+| Client | Description |
+|---|---|
+| [Astra Client 8.6](https://github.com/Mateuzkl/AstraClient) | OTCv8 client based on OTAcademy with a layout inspired by the CIP 15.x appearance |
+| [Otcv8--Classic-8.6](https://github.com/Mateuzkl/Otcv8--Classic-8.6) | OTCv8 Classic using the original CIP 8.60 appearance |
+| [OTC-Fonticak](https://github.com/soyfabi/OTC-Fonticak) | Alternative client based on a Mehah fork |
+
+### CipSoft and custom clients
+
+| Client | Description |
+|---|---|
+| [Client 8.60 + DLL Mount](https://github.com/Mateuzkl/Client-cip-8.60-with-DLL-Mount) | Classic CipSoft 8.60 client with mount support through a modified DLL |
+| [Forgotten Client (Alpha 1.0)](https://github.com/Mateuzkl/The-Forgotten-Client) | Future custom client currently under development |
+
+> CIP 15.x in the Astra description refers only to its visual layout. The server and every client listed here continue to use protocol 8.60.
+
+---
+
+## Contributing
+
+The base is stable and actively maintained. Bug reports and pull requests are welcome.
+
+When opening an issue, include:
+
+- Clear description
+- Steps to reproduce
+- Relevant logs, crash output or Valgrind output
+
+Pull requests should stay focused and change only what is necessary.
+
+---
+
+## Community & Support
+
+Join the Discord to discuss ideas, report bugs, share systems, keep the 8.60 ecosystem alive and follow project updates:
+
+**[Join the Discord Community](https://discord.gg/GxTm7DyXVe)**
+
+If this project helps you, donations are appreciated and help support continued development.
+
+```text
+PIX key: f8761afe-5581-417d-afc8-08cac410a1b0
+```
+
+<p align="center">
+  <img src="https://capsule-render.vercel.app/api?type=waving&color=0:8b5cf6,50:5b1fa8,100:0d0221&height=140&section=footer&text=Made%20with%20%F0%9F%92%9C%20by%20Mateuzkl&fontSize=18&fontColor=ffffff&fontAlignY=65" alt="Made by Mateuzkl" />
+</p>

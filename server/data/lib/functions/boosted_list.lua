@@ -1,0 +1,17 @@
+BOOSTED_MONSTER_LIST = {
+	"Dragon",
+	"Demon",
+	"Giant Spider",
+	"Hydra",
+	"Behemoth",
+	"Mutated Rat",
+	"Necromancer",
+	"Vampire",
+	"Grim Reaper",
+	"Hero",
+	"Bog Raider",
+	"Black Knight",
+	"Warlock",
+	"Medusa",
+	"Serpent Spawn",
+}
