@@ -5,12 +5,19 @@ import copy
 import csv
 import io
 import sys
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from PIL import Image, ImageTk
 
+from .animation import (
+    AnimationPlayback, DEFAULT_DURATION, create_group, duplicate_frame, enable_frame_durations,
+    enable_frame_groups, insert_frame, move_frame, remove_frame, remove_group,
+    validate_animation, validate_group_types,
+)
+from .animation_ui import AnimationPanel
 from .formats import Attribute, FLAG_SPECS, FormatOptions, FrameGroup
 from .project import Project
 from .settings import remember_project, startup_project
@@ -138,6 +145,8 @@ class Editor:
         self.build_objects(left)
         self.build_center(center)
         self.build_properties(right)
+        self.animation_panel = AnimationPanel(self.center_notebook, self)
+        self.center_notebook.add(self.animation_panel, text="Animação / frame groups")
         ttk.Label(self.root, textvariable=self.status, padding=(12, 7), relief="sunken", anchor="w").pack(fill="x", side="bottom")
 
     def build_objects(self, parent):
@@ -250,22 +259,12 @@ class Editor:
             variable.trace_add("write", self.mark_pending)
             self.dim_vars[key] = variable
         self.group_type = tk.IntVar(value=0)
-        ttk.Label(geometry, text="Tipo do grupo (0/1)").grid(row=8, column=0, sticky="w", pady=4)
-        ttk.Spinbox(geometry, from_=0, to=1, textvariable=self.group_type, width=7).grid(row=8, column=1, padx=8)
         self.group_type.trace_add("write", self.mark_pending)
-        groups = ttk.Frame(geometry)
-        groups.grid(row=9, columnspan=2, sticky="w", pady=8)
-        ttk.Button(groups, text="+ Grupo", command=self.add_group).pack(side="left")
-        ttk.Button(groups, text="Remover grupo", command=self.remove_group).pack(side="left", padx=3)
-        ttk.Label(geometry, text="Animação: modo, ciclos, quadro inicial").grid(row=10, columnspan=2, sticky="w", pady=(8, 4))
         self.animation_meta = tk.StringVar(value="0, 0, 0")
-        ttk.Entry(geometry, textvariable=self.animation_meta, width=28).grid(row=11, columnspan=2, sticky="ew")
         self.animation_meta.trace_add("write", self.mark_pending)
-        ttk.Label(geometry, text="Durações min:max em ms (uma por quadro)").grid(row=12, columnspan=2, sticky="w", pady=(8, 4))
         self.duration_text = tk.StringVar()
-        ttk.Entry(geometry, textvariable=self.duration_text, width=28).grid(row=13, columnspan=2, sticky="ew")
         self.duration_text.trace_add("write", self.mark_pending)
-        ttk.Label(geometry, text="Durações são gravadas quando a extensão\nframe-durations está ativa. Sem ela, a prévia\nusa 150 ms por quadro.").grid(row=14, columnspan=2, sticky="w", pady=8)
+        ttk.Label(geometry, text="Edite grupos, quadros e tempos na aba\nAnimação / frame groups.").grid(row=8, columnspan=2, sticky="w", pady=8)
         for text, action in (("Importar folha do objeto…", self.import_thing_sheet), ("Exportar folha do objeto…", self.export_thing_sheet)):
             ttk.Button(geometry, text=text, command=action).grid(columnspan=2, sticky="ew", pady=3)
         ttk.Label(geometry, text="Ao redimensionar, slots nas mesmas\ncoordenadas são preservados.").grid(columnspan=2, sticky="w", pady=8)
@@ -501,6 +500,7 @@ class Editor:
             value.set("")
         self.slot_tree.delete(*self.slot_tree.get_children())
         self.loading = False
+        self.animation_panel.load()
 
     def load_properties(self):
         if not self.thing:
@@ -529,6 +529,7 @@ class Editor:
         self.pending = False
         self.update_exact_size()
         self.loading = False
+        self.animation_panel.load()
         self.refresh_slots()
         self.draw_preview()
         self.update_title()
@@ -548,6 +549,8 @@ class Editor:
             group.group_type = self.group_type.get()
             if group.group_type not in (0, 1):
                 raise ValueError("Tipo do grupo deve ser 0 (parado) ou 1 (andando).")
+            if self.project.options.frame_groups:
+                validate_group_types(candidate)
             if self.project.options.frame_durations and group.frames > 1:
                 meta = [int(v.strip()) for v in self.animation_meta.get().split(",")]
                 if len(meta) != 3:
@@ -555,9 +558,17 @@ class Editor:
                 group.animation_mode, group.loop_count, group.start_frame = meta
                 text = self.duration_text.get().strip()
                 durations = [tuple(int(v.strip()) for v in pair.split(":")) for pair in text.split(",")] if text else [(150, 150)] * group.frames
+                original = self.thing.groups[self.group_index]
+                previous = ", ".join(f"{low}:{high}" for low, high in original.durations)
+                if group.frames != original.frames and text == previous:
+                    durations = list(original.durations[:group.frames])
+                    durations.extend([DEFAULT_DURATION] * (group.frames - len(durations)))
+                    if meta[2] == original.start_frame and meta[2] >= group.frames:
+                        group.start_frame = 0
                 if len(durations) != group.frames or any(len(d) != 2 or d[0] < 0 or d[0] > d[1] for d in durations):
                     raise ValueError("Informe um par min:max válido por quadro, em milissegundos.")
                 group.durations = durations
+                validate_animation(group)
             attrs = {}
             for code, (enabled, variable) in self.flag_vars.items():
                 if not enabled.get():
@@ -596,30 +607,67 @@ class Editor:
             self.group_var.set(self.group_index)
             return
         self.stop_animation()
+        if not self.thing or not 0 <= target < len(self.thing.groups):
+            return
         self.group_index = target
         self.load_properties()
 
-    def add_group(self):
+    def enable_animation_feature(self, feature):
+        if not self.apply_properties():
+            return
+        self.stop_animation()
+        if feature == "frame_groups":
+            changed = enable_frame_groups(self.project.dat, self.project.options)
+        elif feature == "frame_durations":
+            changed = enable_frame_durations(self.project.dat, self.project.options)
+        else:
+            raise ValueError("Extensão de animação desconhecida.")
+        if changed:
+            self.mark_dirty()
+            self.load_properties()
+            self.status.set("Extensão ativada. Salve para atualizar DAT e OTFI do projeto.")
+
+    def add_group(self, duplicate=True):
         if not self.thing or not self.apply_properties():
             return
-        if self.thing.category != 1 or not self.project.options.frame_groups:
-            raise ValueError("Grupos exigem uma criatura e a extensão frame-groups ativa ao criar o projeto.")
-        if len(self.thing.groups) >= 2:
-            raise ValueError("Use um grupo parado e um grupo andando (máximo 2).")
-        group = copy.deepcopy(self.thing.groups[self.group_index])
-        group.group_type = 1 - group.group_type
-        self.thing.groups.append(group)
-        self.group_index = len(self.thing.groups) - 1
+        self.stop_animation()
+        self.group_index = create_group(self.thing, self.project.options, self.group_index, duplicate=duplicate)
         self.mark_dirty()
         self.load_properties()
 
     def remove_group(self):
         if self.thing and len(self.thing.groups) > 1 and self.apply_properties():
             if messagebox.askyesno("Remover grupo", "Remover este grupo de animação? As sprites da biblioteca serão preservadas.", parent=self.root):
-                del self.thing.groups[self.group_index]
-                self.group_index = 0
+                self.stop_animation()
+                self.group_index = remove_group(self.thing, self.group_index)
                 self.mark_dirty()
                 self.load_properties()
+
+    def edit_animation_frame(self, action):
+        if not self.thing or not self.apply_properties():
+            return
+        self.stop_animation()
+        group = self.thing.groups[self.group_index]
+        frame = min(self.selectors["frame"][0].get(), group.frames - 1)
+        options = {"durations": self.project.options.frame_durations}
+        if action == "insert":
+            selected = insert_frame(group, frame + 1, **options)
+        elif action == "duplicate":
+            selected = duplicate_frame(group, frame, **options)
+        elif action == "remove":
+            if group.frames == 1:
+                return
+            selected = remove_frame(group, frame, **options)
+        elif action in ("up", "down"):
+            destination = frame + (-1 if action == "up" else 1)
+            if not 0 <= destination < group.frames:
+                return
+            selected = move_frame(group, frame, destination, **options)
+        else:
+            raise ValueError("Operação de quadro desconhecida.")
+        self.selectors["frame"][0].set(selected)
+        self.mark_dirty()
+        self.load_properties()
 
     def refresh_slots(self):
         coordinates = self.slot_coordinates()
@@ -697,6 +745,8 @@ class Editor:
         group = self.thing.groups[self.group_index]
         kwargs = {key: min(variable.get(), (group.frames if key == "frame" else getattr(group, key)) - 1) for key, (variable, _combo) in self.selectors.items()}
         image = self.project.render_thing(self.thing, group=self.group_index, **kwargs)
+        if hasattr(self, "animation_panel"):
+            self.animation_panel.show_frame(kwargs["frame"])
         scale = self.preview_zoom.get()
         width = max(1, self.preview_canvas.winfo_width() - 20)
         height = max(1, self.preview_canvas.winfo_height() - 20)
@@ -714,6 +764,12 @@ class Editor:
         elif self.thing and self.apply_properties():
             self.playing = True
             self.play_button.configure(text="■ Parar")
+            group = self.thing.groups[self.group_index]
+            self.animation_playback = AnimationPlayback(
+                group, timed=self.project.options.frame_durations,
+                now_ms=int(time.monotonic() * 1000), selected_frame=self.selectors["frame"][0].get(),
+            )
+            self.selectors["frame"][0].set(self.animation_playback.frame)
             self.animate()
 
     def stop_animation(self):
@@ -727,17 +783,26 @@ class Editor:
     def animate(self):
         if not self.playing or not self.thing:
             return
-        g = self.thing.groups[self.group_index]
         variable = self.selectors["frame"][0]
-        frame = variable.get() % g.frames
         self.draw_preview()
-        delay = max(16, min(10000, g.durations[frame][0])) if g.durations and self.project.options.frame_durations else 150
+        playback = self.animation_playback
+        # Tk's native timer uses a signed millisecond count; split longer waits.
+        delay = playback.delay()
         def next_frame():
-            if self.playing and self.thing:
-                current = self.thing.groups[self.group_index]
-                variable.set((variable.get() + 1) % current.frames)
-                self.animate()
-        self.animation_job = self.root.after(delay, next_frame)
+            if self.playing and self.thing and playback is self.animation_playback:
+                self.animation_job = None
+                if playback.advance():
+                    variable.set(playback.frame)
+                    self.animate()
+                else:
+                    self.stop_animation()
+        def wait_remaining(remaining):
+            if not self.playing or playback is not self.animation_playback:
+                return
+            portion = min(remaining, 0x7FFFFFFF)
+            callback = next_frame if remaining <= portion else lambda: wait_remaining(remaining - portion)
+            self.animation_job = self.root.after(portion, callback)
+        wait_remaining(delay)
 
     def refresh_library(self):
         self.library_canvas.delete("all")

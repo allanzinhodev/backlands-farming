@@ -60,6 +60,24 @@ Novos objetos e sprites são acrescentados ao fim. Duplicar um objeto copia sua
 geometria e flags, mantendo as referências às sprites. Para criar arte independente,
 importe outra sprite e vincule seu novo ID. Não há exclusão que renumere IDs existentes.
 
+## Grupos e quadros de animação
+
+A aba **Animação / frame groups** permite selecionar, criar, duplicar e remover
+grupos. No DAT clássico, criaturas aceitam os grupos **parado/padrão (0)** e
+**andando (1)**, um de cada tipo. Itens, efeitos e projéteis animam os quadros de
+seu grupo único. Grupos adicionais de ações futuras exigirão suporte no cliente
+e em outro formato; o editor mantém o DAT compatível com esta base.
+
+É possível inserir quadros vazios, duplicar, remover e mover quadros para cima ou
+baixo, preservando todas as camadas, tiles e padrões de cada quadro. Sprites de
+quadros removidos continuam na biblioteca. Edite o mínimo/máximo em milissegundos
+por quadro, modo, ciclos e quadro inicial e clique em **Aplicar animação**.
+O desenho dos quadros usa os mesmos slots e ferramentas de pixels do editor.
+
+As extensões podem ser ativadas num projeto existente. Ativar grupos preserva
+os quadros e referências das criaturas; ativar durações inicializa as animações
+existentes com 150 ms por quadro. DAT e OTFI são atualizados juntos ao salvar.
+
 ## Folhas de objetos
 
 **Exportar folha do objeto** inclui todas as camadas, padrões e quadros do **grupo
