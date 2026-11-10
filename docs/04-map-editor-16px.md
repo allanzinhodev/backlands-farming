@@ -41,12 +41,22 @@ a opção 2 parte da 1.
 6. Compilar Release x64 (VS 2026 + vcpkg, já instalados nesta máquina) e testar com um `.spr`/`.dat` 16px de exemplo.
 7. CI: job extra no workflow do Windows com `-DNEXAMAP_SPRITE_PIXELS=16`.
 
-## Dependência bloqueante: de onde vem o `.spr` 16px?
+## Editor DAT/SPR 16px
 
-Object Builder e ferramentas comuns de OT só geram 32x32. Precisamos de uma ferramenta própria
-(script Python/Rust) que faça **PNGs 16px → `.spr` + `.dat`** — e, de quebra, gere os **atlases PNG**
-que o cliente web vai consumir. Uma fonte única de verdade (pasta de PNGs + um manifesto com as flags do
-`.dat`) alimenta editor, cliente web e `items.otb`/`items.xml`.
+O [Backlands Asset Studio](../object-editor/README.md) implementa a edição nativa de
+DAT/SPR 8.60 em 16×16, inspirado no fluxo do ObjectBuilder. Permite criar e duplicar
+itens, criaturas, efeitos e projéteis; editar flags, geometria e pixels; importar e
+exportar PNGs/folhas; visualizar animações; e salvar DAT, SPR e OTFI com backups.
+
+O ObjectBuilder consultado permite configurar dimensões, mas seu catálogo padrão
+começa em 32×32. O editor deste repositório usa 16×16 desde a leitura até a gravação,
+incluindo a declaração `sprite-size: 16` / `sprite-data-size: 1024` no OTFI. A carga
+normal do NexaMap deve usar o build `NEXAMAP_SPRITE_PIXELS=16`; a ferramenta de
+migração clássica ainda contém restrições a 32px.
+
+Atlases do futuro cliente web e geração/sincronização de `items.otb`/`items.xml`
+permanecem etapas separadas. Uma fonte única (PNGs + manifesto) poderá alimentar
+essa pipeline posteriormente:
 
 ```
 assets/ (PNG 16px + manifest.yaml com flags)
