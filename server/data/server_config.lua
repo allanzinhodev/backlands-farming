@@ -10,8 +10,8 @@ astraClientOnly = false
 fonticakClientOnly = false
 -- Server-controlled Astra item state protocol: duration, charges and packed inventory snapshot.
 astraItemStateEnabled = true
-hirelingSystemEnabled = true
-astraHirelingProtocolEnabled = true
+hirelingSystemEnabled = false
+astraHirelingProtocolEnabled = false
 
 -- Dual Wielding
 -- NOTE: dualWieldingSpeedRate = 200 means dual-wielding attacks twice as fast
@@ -25,10 +25,10 @@ dualWieldingMode = "allweapons"
 
 -- Reset System
 -- Enable or disable the full reset system.
-resetssystem = true
+resetssystem = false
 
 -- Cleave System
-cleavesystem = true
+cleavesystem = false
 cleaveDefaultPercent = 30
 cleaveFistPercent = 20
 

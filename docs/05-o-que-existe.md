@@ -87,6 +87,25 @@ Não precisa apagar C++ para desligar um sistema (os flags do `config.lua` basta
 `rewardchest.*`, `stash.*`, `spy.*`, `protocolspectator.*`, `stress_test.*`, `store/`. Isso exige mexer em
 `game.cpp`/`player.cpp`/`protocolgame.cpp`, então fica para quando o jogo estiver jogável.
 
+## Progresso da limpeza
+
+**Rodada 1 (2026-11-10)**: foram removidos 3.388 arquivos e cerca de 385 mil linhas.
+
+| Área | Feito |
+|---|---|
+| `config.lua.dist` | `reloadCommandEnabled`, `gameStore` e `toggleChainSystem` passam a `false`. `adminPassword` fica `""`, o que desliga o protocolo admin. Os demais sistemas 15.x já vinham desligados. |
+| `monsters/` | Ficam apenas `mammals`, `vermins`, `birds`, `plants` e `trainers` (177 tipos). Saem também `hideous_fungus` e `hive_overseer`, que invocavam monstros de pastas removidas. |
+| `spells/spells_monsters/` | Ficam as 27 magias usadas pelos monstros mantidos. |
+| `spells/` | Saem `familiar` e `soulpit`. As magias de jogador ficam para decisão de design. |
+| `npc/crystalserver/` | Removida. |
+| Sistemas | Saem `magic-roulette-master`, `resetsystem`, `monster_level_system`, `echo`, `spy`, `quests`, `actions/quests`, `actions/soulpit`, `talkactions/stress` e `god/stress`. |
+| `network/` | Ficam `daily_reward`, `highscores`, `item_values`, `market`, `misc_analyzer`, `mounts`, `party_vitals`, `player`, `quests`, `task_board`, `task_hunting` (dependência do `task_board`) e `unjustified_points`. |
+| globalevents, creaturescripts, movements, actions | Saem boosted, hirelings, imbuement, influenced spawn, portal effects, bestiary, bounty, boss room/lever, forge, supply stash e as instâncias. |
+| talkactions | Saem chain, cleave, promotion e find_influenced. |
+| `raids/` | O raid de dragões foi removido e o `raids.xml` ficou vazio. |
+
+O mapa de exemplo ainda tem spawns de monstros removidos. Isso gera avisos `can not find` no boot, mas não impede a subida. Os avisos somem quando o mapa for trocado (etapa 3).
+
 ## Ordem sugerida de limpeza
 
 1. Desligar flags no `config.lua` (sem apagar nada) e subir o servidor para confirmar que funciona.

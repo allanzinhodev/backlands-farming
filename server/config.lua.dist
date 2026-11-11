@@ -198,11 +198,11 @@ quickLootMaxCorpses = 30
 -- Allow the /reload command (god only). Set false to disable it.
 -- Be careful when using it: it reloads all scripts, which can overload the server
 -- and may even cause a crash if you have a lot of files or many modifications.
-reloadCommandEnabled = true
+reloadCommandEnabled = false
 
 -- Game Store (uses accounts.tibia_coins as its coin balance)
 -- Native catalog, purchases and coin transfers for compatible OTClient clients.
-gameStore = true
+gameStore = false
 -- Experience bonus percentage granted by Store XP boosts (1-255, default: 50%).
 storeXpBoostPercent = 50
 -- Default duration in seconds when an offer omits it (60-65535, default: 3600s = 1h).
@@ -556,7 +556,7 @@ statsVerySlowLogTime = 0
 
 -- Admin Protocol
 adminPort = 7170
-adminPassword = "admin"
+adminPassword = "" -- vazio desliga o protocolo admin; defina uma senha forte se precisar
 adminLocalhostOnly = true
 adminRequireLogin = true
 adminEncryption = ""
@@ -566,7 +566,7 @@ adminConnectionsLimit = 1
 
 -- Chain System
 -- Chain system allows attacks to bounce from target to nearby targets
-toggleChainSystem = true
+toggleChainSystem = false
 -- Delay in milliseconds between each chain hop
 combatChainDelay = 50
 -- Maximum number of chain targets for weapon chain
