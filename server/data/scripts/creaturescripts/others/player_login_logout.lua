@@ -22,29 +22,12 @@ function loginMessage.onLogin(player)
     end
     player:sendTextMessage(MESSAGE_STATUS_DEFAULT, loginStr)
 
-    local vocation = player:getVocation()
-    local promotion = vocation:getPromotion()
-    if player:isPremium() then
-        local value = player:getStorageValue(PlayerStorageKeys.promotion)
-        if value and value == 1 then
-            player:setVocation(promotion)
-        end
-    elseif not promotion then
-        player:setVocation(vocation:getDemotion())
-    end
-
     -- Update Experience Rate Stamina
     player:updateStamina()
 
     player:registerEvent("logoutMessage")
 
     player:openChannel(10)
-
-	if configManager.getBoolean(RESET_SYSTEM_ENABLED) then
-		if ResetBonusConfig then
-			ResetBonusConfig.applyBonuses(player)
-		end
-	end
 
     if player:isTokenProtected() then
         player:setTokenLocked(true)

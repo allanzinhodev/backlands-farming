@@ -1,2 +1,0 @@
--- Mentor Other removed (Vocation Adjustment): the Monk virtues now buff nearby party
--- members directly, making this spell redundant. Spell id 277 / words "uteta tio" are now free.

@@ -1,140 +1,33 @@
-local config = {
-	[VOCATION.ID.NONE] = {
-		container = {
-			{ 3003, 1 }, -- rope
-			{ 3457, 1 }, -- shovel
-		},
-	},
-
-	[VOCATION.ID.SORCERER] = {
-		items = {
-			{ 3059, 1 }, -- spellbook
-			{ 3074, 1 }, -- wand of vortex
-			{ 7991, 1 }, -- magician's robe
-			{ 7992, 1 }, -- mage hat
-			{ 3362, 1 }, -- studded legs
-			{ 3552, 1 }, -- leather boots
-			{ 3572, 1 }, -- scarf
-		},
-
-		container = {
-			{ 3003, 1 }, -- rope
-			{ 5710, 1 }, -- light shovel
-			{ 268, 10 }, -- mana potion
-		},
-	},
-
-	[VOCATION.ID.DRUID] = {
-		items = {
-			{ 3059, 1 }, -- spellbook
-			{ 3066, 1 }, -- snakebite rod
-			{ 7991, 1 }, -- magician's robe
-			{ 7992, 1 }, -- mage hat
-			{ 3362, 1 }, -- studded legs
-			{ 3552, 1 }, -- leather boots
-			{ 3572, 1 }, -- scarf
-		},
-
-		container = {
-			{ 3003, 1 }, -- rope
-			{ 5710, 1 }, -- light shovel
-			{ 268, 10 }, -- mana potion
-		},
-	},
-
-	[VOCATION.ID.PALADIN] = {
-		items = {
-			{ 3425, 1 }, -- dwarven shield
-			{ 3277, 1 }, -- spear
-			{ 3571, 1 }, -- ranger's cloak
-			{ 8095, 1 }, -- ranger legs
-			{ 3552, 1 }, -- leather boots
-			{ 3572, 1 }, -- scarf
-			{ 3374, 1 }, -- legion helmet
-		},
-
-		container = {
-			{ 3003, 1 }, -- rope
-			{ 5710, 1 }, -- light shovel
-			{ 266, 10 }, -- health potion
-			{ 3350, 1 }, -- bow
-			{ 3447, 50 }, -- 50 arrows
-		},
-	},
-
-	[VOCATION.ID.KNIGHT] = {
-		items = {
-			{ 3425, 1 }, -- dwarven shield
-			{ 7773, 1 }, -- steel axe
-			{ 3359, 1 }, -- brass armor
-			{ 3354, 1 }, -- brass helmet
-			{ 3372, 1 }, -- brass legs
-			{ 3552, 1 }, -- leather boots
-			{ 3572, 1 }, -- scarf
-		},
-
-		container = {
-			{ 7774, 1 }, -- jagged sword
-			{ 3327, 1 }, -- daramanian mace
-			{ 3003, 1 }, -- rope
-			{ 5710, 1 }, -- light shovel
-			{ 266, 10 }, -- health potion
-		},
-	},
-
-	[VOCATION.ID.MONK] = {
-		items = {
-			{ 50171, 1 }, -- jo staff
-			{ 3359, 1 }, -- brass armor
-			{ 3354, 1 }, -- brass helmet
-			{ 3372, 1 }, -- brass legs
-			{ 3552, 1 }, -- leather boots
-			{ 3572, 1 }, -- scarf
-		},
-
-		container = {
-			{ 3425, 1 }, -- dwarven shield
-			{ 3003, 1 }, -- rope
-			{ 5710, 1 }, -- light shovel
-			{ 266, 10 }, -- health potion
-		},
-	},
+-- Shared starter kit for Backlands farmers. IDs match data/items/items.xml.
+local starterItems = {
+    { 3003, 1 }, -- rope
+    { 3457, 1 }, -- shovel
+    { 3453, 1 }, -- scythe (harvest ripe wheat)
+    { 3483, 1 }, -- fishing rod
+    { 3492, 20 }, -- worms
+    { 650, 1 }, -- watering can
+    { 647, 10 }, -- seeds (drop one on an empty flower pot)
+    { 306, 1 }, -- empty flower pot
+    { 3600, 5 }, -- bread
+    { 3031, 50 }, -- gold for supplies
 }
 
 local firstItems = CreatureEvent("FirstItems")
 function firstItems.onLogin(player)
-	local vocationId = player:getVocation():getId()
-	local lastLogin = player:getLastLoginSaved()
+    if player:getLastLoginSaved() > 0 then
+        return true
+    end
 
-	if not configManager.getBoolean(configKeys.MONK_VOCATION_ENABLED) and (vocationId == 9 or vocationId == 10) then
-		return true
-	end
-
-	if lastLogin > 0 then
-		return true
-	end
-
-	local targetVocation = config[vocationId]
-	if not targetVocation then
-		return true
-	end
-
-	if targetVocation.items then
-		for i = 1, #targetVocation.items do
-			player:addItem(targetVocation.items[i][1], targetVocation.items[i][2])
-		end
-	end
-
-	local backpack = player:addItem(2854) or player:addItem(1987)
-	if not backpack then
-		return true
-	end
-
-	if targetVocation.container then
-		for i = 1, #targetVocation.container do
-			backpack:addItem(targetVocation.container[i][1], targetVocation.container[i][2])
-		end
-	end
-	return true
+    local backpack = player:addItem(2854)
+    if not backpack then
+        return true
+    end
+    for _, entry in ipairs(starterItems) do
+        backpack:addItem(entry[1], entry[2])
+    end
+    backpack:addItem(2873, FLUID_WATER) -- bucket for bread-making
+    player:sendTextMessage(MESSAGE_STATUS_DEFAULT,
+        "Welcome, farmer! Use your scythe on ripe wheat and say hi, then trade to the Seed Vendor or Harvest Buyer in the village.")
+    return true
 end
 firstItems:register()

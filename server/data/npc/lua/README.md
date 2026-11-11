@@ -2,6 +2,14 @@
 
 This folder is organized by NPC role. The NPC loader scans this folder recursively, so subfolders are safe.
 
+## farming
+- `seed_vendor.lua`: **Seed Vendor**, sells seeds, pots, watering cans and farm tools.
+- `harvest_buyer.lua`: **Harvest Buyer**, buys wheat, flour, bread, fruit, vegetables, fish and mushrooms.
+
+These NPCs use the existing TFS NPC library and current item IDs. Say `hi`, then `trade`.
+Seeds currently grow ornamental plants in pots; wheat uses the existing scythe/decay cycle.
+The starter world places both NPCs in the village square.
+
 ## bank
 - `banker.lua`
 - `Guild_Banker.lua`

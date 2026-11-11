@@ -1,6 +1,6 @@
 # O que já existe no servidor — guia para limpeza
 
-Inventário de `server/` (levantado em 2026-11-10). Tudo está em `server/data/` salvo indicação.
+Inventário original de `server/` (levantado em 2026-11-10). As quantidades abaixo são anteriores à limpeza; veja o progresso no fim deste documento. Tudo está em `server/data/` salvo indicação.
 Coluna **Sugestão**: ✂️ remover · 🔁 reaproveitar para fazenda · ✅ manter. A decisão final é sua.
 Config dos sistemas opcionais: ver [02-features-e-custo.md](02-features-e-custo.md).
 
@@ -77,7 +77,7 @@ Monstros carregados no boot custam RAM/tempo de startup (`forceMonsterTypesOnLoa
 | `XML/zone_weather.xml` | 🔁 clima por zona (chuva molhando a lavoura) |
 | `raids/` | ✂️ ou 🔁 como "praga" |
 | `store/` | ✂️ até definir monetização |
-| `schema.sql` → conta padrão | ✂️ antes de produção |
+| `schema.sql` → conta padrão | Removida; o launcher em `tools/dev` cria uma conta somente no banco local de desenvolvimento |
 | `key.pem` | trocar (ver [03-cliente-web.md](03-cliente-web.md)) |
 
 ## Código C++ (`server/src/`) ligado a sistemas dispensáveis
@@ -105,12 +105,27 @@ Não precisa apagar C++ para desligar um sistema (os flags do `config.lua` basta
 | talkactions | Saem chain, cleave, promotion e find_influenced. |
 | `raids/` | O raid de dragões foi removido e o `raids.xml` ficou vazio. |
 
-O mapa de exemplo ainda tem spawns de monstros removidos. Isso gera avisos `can not find` no boot, mas não impede a subida. Os avisos somem quando o mapa for trocado (etapa 3).
+**Rodada 2 (2026-11-11)**: a base da fazenda substituiu o mapa de demonstração.
+
+| Área | Feito |
+|---|---|
+| Mundo | Mapa inicial com 2.021 tiles, praça protegida, cabana pública, canteiros, trigo colhível, lago para pesca e pasto reservado para os futuros animais. Entrada em **100, 100, 7**, cidade Backlands. As 61 casas e os spawns antigos saíram. |
+| Personagem | Uma vocação, **Farmer (0)**, com os dois outfits iniciais. Catálogo de montarias vazio até existir arte própria. Login/logout não dependem mais de promoção. |
+| NPCs e ferramentas | **Seed Vendor** vende insumos e ferramentas; **Harvest Buyer** compra a produção. Primeiro login entrega mochila, foice, vara, minhocas, sementes, vaso, regador e outros suprimentos. Não há duplicação do kit no relogin. |
+| Monstros | O commit `4ecfb462` removeu os 177 tipos restantes e suas 27 magias. A pasta permanece vazia até receber criaturas próprias. O mapa inicial não depende desses tipos. |
+| Magias | Removidos mais 231 scripts de jogador, incluindo as três runas que só eram mantidas por dependência dos monstros. Permanecem seis habilidades básicas para Farmer e quatro comandos de casa. |
+| Startup | Tabelas de posições/ações do mapa antigo esvaziadas; removidas referências à Dawnport e à quest Demon Helmet. |
+| Configuração | Mundo sem PvP, Account Manager e treino em camas desligados, spawn ajustado ao mapa e comércio/market habilitado. |
+| Verificação | Sete testes do mapa, oito testes Lua (incluindo pesca → venda) e subida real do TFS sem erros Lua nem avisos de spawns ausentes. |
+
+O gerador e os pontos de teste estão em [tools/world/README.md](../tools/world/README.md).
+As sementes atuais produzem plantas em vasos; o trigo usa o ciclo existente de foice e regeneração.
+Isso fornece uma base para testar, enquanto o plantio em canteiros e a arte original ainda serão desenvolvidos.
 
 ## Ordem sugerida de limpeza
 
 1. Desligar flags no `config.lua` (sem apagar nada) e subir o servidor para confirmar que funciona.
 2. Apagar monstros/NPCs/spells em massa → reiniciar → corrigir referências quebradas no log.
 3. Trocar o mapa por um mapa mínimo do Backlands.
-4. Trocar itens (`items.otb`/`items.xml`) junto com os assets 16px.
-5. Por último, remover código C++ de sistemas que não voltarão.
+4. Trocar itens (`items.otb`/`items.xml`) junto com a **arte original** 16px. O catálogo atual permanece necessário para os assets provisórios, o mapa e as ferramentas.
+5. Por último, remover código C++ de sistemas que não voltarão. Os sistemas opcionais continuam desabilitados; esta etapa exige uma decisão posterior sobre as mecânicas definitivas.

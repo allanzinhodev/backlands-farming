@@ -19,10 +19,4 @@ LeverUnique = {
 	[30001] = {itemId = 2772, itemPos = {x = 33416, y = 32102, z = 10}}
     ]]
 
-	-- Demon helmet quest
-	-- Path: data\scripts\quests\demon_helmet\action-lever.lua
-	[30001] = {
-		itemId = 1945,
-		itemPos = {x = 16898, y = 17587, z = 15}
-	},
 }

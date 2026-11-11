@@ -16,12 +16,12 @@ boostedBossLootBonus = 250       -- Loot bonus percent for boosted boss
 boostedBossKillBonus = 3         -- Bosstiary kill multiplier for boosted boss
 
 -- Account Manager
-accountManager = true
+accountManager = false
 namelockManager = true
-newPlayerChooseVoc = true
-newPlayerSpawnPosX = 0
-newPlayerSpawnPosY = 0
-newPlayerSpawnPosZ = 0
+newPlayerChooseVoc = false
+newPlayerSpawnPosX = 100
+newPlayerSpawnPosY = 100
+newPlayerSpawnPosZ = 7
 newPlayerTownId = 1
 newPlayerLevel = 8
 newPlayerMagicLevel = 0
@@ -32,7 +32,7 @@ generateAccountNumber = false
 
 -- Combat settings
 -- NOTE: valid values for worldType are: "pvp", "no-pvp" and "pvp-enforced"
-worldType = "pvp"
+worldType = "no-pvp"
 hotkeyAimbotEnabled = true
 protectionLevel = 1
 killsToRedSkull = 3
@@ -50,7 +50,7 @@ pzLockSkullAttacker = false
 allowAutoAttackWithoutExhaustion = true
 -- Directional melee swing marks for AstraClient and OTC-Fonticak (opcode 0x93).
 -- When false, OTC clients receive no melee swing visuals. Classic clients are unaffected.
-meleeWeaponSwingMarksEnabled = true
+meleeWeaponSwingMarksEnabled = false
 
 -- Protection Time
 -- Grants protection upon connection if monsters are nearby, to give you a grace period; if you move or attack, the protection is deactivated.
@@ -76,11 +76,11 @@ gameProtocolPort = 7172
 statusProtocolPort = 7171
 adminPort = 7170
 maxPlayers = 500
-motd = "Welcome to The Forgotten Server!"
+motd = "Bem-vindo ao Backlands Farming!"
 onePlayerOnlinePerAccount = true
 allowClones = false
 allowWalkthrough = true
-serverName = "Forgotten"
+serverName = "Backlands Farming"
 statusTimeout = 5000
 replaceKickOnLogin = true
 maxPacketsPerSecond = 25
@@ -170,7 +170,7 @@ bestiarySystemEnabled = false
 echoRaidSystemEnabled = false
 echoRaidPortalSpawnNumerator = 100
 echoRaidPortalSpawnDenominator = 200000
-marketSystemEnabled = false
+marketSystemEnabled = true
 preySystemEnabled = false
 battlePassSystemEnabled = false
 -- Highest reward level transmitted by the Battle Pass reward track.
@@ -307,7 +307,7 @@ RANGE_ROTATE_ITEM_INTERVAL = 250
 mapName = "world"
 mapCacheMode = "auto" -- "auto" or "off"
 mapCacheDirectory = "data/cache/maps"
-mapAuthor = "Skyyzyy"
+mapAuthor = "Backlands"
 
 -- Market
 marketOfferDuration = 30 * 24 * 60 * 60
@@ -346,7 +346,7 @@ minimumLevelToSendPrivate = 1
 premiumToSendPrivate = false
 forceMonsterTypesOnLoad = true
 cleanProtectionZones = false
-bedOfflineTraining = true
+bedOfflineTraining = false
 showPlayerLogInConsole = true
 healthGainColour = 95
 manaGainColour = 158
