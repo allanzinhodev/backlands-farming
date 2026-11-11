@@ -15,9 +15,10 @@ COPY vcpkg-overlays ./vcpkg-overlays/
 # Pre-seed Lua's distfile to avoid transient vcpkg download timeouts in CI.
 RUN set -eux; \
     mkdir -p /opt/vcpkg/downloads; \
-    curl -fL --retry 10 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 600 \
-        -o /opt/vcpkg/downloads/lua-5.5.0.tar.gz \
-        https://www.lua.org/ftp/lua-5.5.0.tar.gz; \
+    for url in https://www.lua.org/ftp/lua-5.5.0.tar.gz https://www.tecgraf.puc-rio.br/lua/ftp/lua-5.5.0.tar.gz; do \
+        curl -fL --retry 3 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 600 \
+            -o /opt/vcpkg/downloads/lua-5.5.0.tar.gz "$url" && break; \
+    done; \
     /opt/vcpkg/vcpkg install --triplet x64-linux
 # Copiar el resto del código
 COPY cmake /usr/src/forgottenserver-downgrade/cmake/

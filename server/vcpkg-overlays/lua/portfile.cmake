@@ -1,5 +1,6 @@
 vcpkg_download_distfile(ARCHIVE
     URLS "https://www.lua.org/ftp/lua-${VERSION}.tar.gz"
+         "https://www.tecgraf.puc-rio.br/lua/ftp/lua-${VERSION}.tar.gz"
     FILENAME "lua-${VERSION}.tar.gz"
     SHA512 3253d2cdc929da6438095a30d66ef16a1abdbb0ada8fee238705b3b38492f14be9553640fdca6b25661e01155ba5582032e0a2ef064e4c283e85efc0a128cabe
 )
