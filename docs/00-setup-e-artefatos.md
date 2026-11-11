@@ -4,15 +4,17 @@
 
 ```
 backlandsofc/                  (= github.com/allanzinhodev/backlands-farming)
-├── docs/                      planejamento
+├── server/                    TFS modificado e dados da fazenda
+├── map-editor/                NexaMap com opção de tiles 16px
+├── object-editor/             editor DAT/SPR e associações XML/OTB
+├── tools/                     gerador do mapa e launchers de teste
+├── docs/                      documentação
 └── _study/                    IGNORADO pelo git
-    ├── AstraClient/           só estudo — nunca sobe
-    ├── forgottenserver-downgrade-1.8-8.60/
-    └── NexaMap-Editor/
+    └── AstraClient/           clone local, não versionado
 ```
 
-Servidor e editor ficam em `_study/` enquanto só estudamos. Quando formos modificá-los,
-entram no repo com `git subtree`, o que mantém a possibilidade de puxar updates do upstream:
+Servidor e editor já foram importados com `git subtree`, mantendo a possibilidade
+de puxar updates do upstream. Os comandos de referência são:
 
 ```bash
 git subtree add  --prefix server     https://github.com/Mateuzkl/forgottenserver-downgrade-1.8-8.60 main --squash
@@ -45,9 +47,13 @@ Observações:
   O jeito mais rápido de testar é o `Dockerfile` que já vem no repo do servidor.
 - Toolchain local disponível: Visual Studio 2026 (MSVC 14.51) + vcpkg em `C:\vcpkg` + Docker + WSL — dá para compilar tudo localmente.
 
-### Subindo o servidor para teste (Docker, sugestão)
+### Subindo o servidor para teste
 
-1. MariaDB: `docker run -d --name bl-db -e MARIADB_ROOT_PASSWORD=dev -e MARIADB_DATABASE=forgottenserver -p 3306:3306 mariadb:11`
-2. Importar `schema.sql`.
-3. `config.lua` ← `config.lua.dist`, ajustando `mysql*` e `ip`.
-4. Rodar o `tfs` do artifact (ou `docker build` com o Dockerfile do repo).
+```powershell
+docker build -t backlands-server:dev server
+python tools/dev/server.py start
+```
+
+O launcher cria um MariaDB isolado e o TFS sem publicar portas no host, importa
+o schema e prepara a conta de desenvolvimento `fazenda` / `fazenda`. Configuração,
+persistência e comandos de parada: [tools/dev/README.md](../tools/dev/README.md).

@@ -16,6 +16,8 @@ dist/
 *.pdb
 *.obj
 *.lib
+__pycache__/
+*.pyc
 
 # Backups e arquivos temporários do editor de assets.
 **/.backups/

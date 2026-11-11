@@ -1,3 +1,4 @@
+-- ID 1 remains reserved for the legacy Account Manager, without a default account.
 CREATE TABLE IF NOT EXISTS `accounts` (
   `id` int NOT NULL AUTO_INCREMENT,
   `name` varchar(32) NOT NULL,
@@ -11,10 +12,8 @@ CREATE TABLE IF NOT EXISTS `accounts` (
   `points_second` int NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),
   UNIQUE KEY `name` (`name`)
-) ENGINE=InnoDB DEFAULT CHARACTER SET=utf8;
+) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARACTER SET=utf8;
 
-INSERT INTO `accounts` (`id`, `name`, `password`, `secret`, `type`, `premium_ends_at`, `email`, `creation`, `tibia_coins`, `points_second`) VALUES
-(1, '1', '356a192b7913b04c54574d18c28d46e6395428ab', NULL, 1, 0, '', 0, 0, 0);
 
 CREATE TABLE IF NOT EXISTS `players` (
   `id` int NOT NULL AUTO_INCREMENT,
@@ -100,10 +99,8 @@ CREATE TABLE IF NOT EXISTS `players` (
   FOREIGN KEY (`account_id`) REFERENCES `accounts` (`id`) ON DELETE CASCADE,
   KEY `vocation` (`vocation`),
   KEY `idx_players_deletion` (`deletion`)
-) ENGINE=InnoDB DEFAULT CHARACTER SET=utf8;
+) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARACTER SET=utf8;
 
-INSERT INTO `players` (`id`, `name`, `group_id`, `account_id`, `level`, `vocation`, `health`, `healthmax`, `experience`, `lookbody`, `lookfeet`, `lookhead`, `looklegs`, `looktype`, `lookaddons`, `currentmount`, `randomizemount`, `direction`, `maglevel`, `mana`, `manamax`, `manaspent`, `soul`, `town_id`, `posx`, `posy`, `posz`, `conditions`, `cap`, `sex`, `lastlogin`, `lastip`, `save`, `skull`, `skulltime`, `lastlogout`, `blessings`, `onlinetime`, `deletion`, `balance`, `offlinetraining_time`, `offlinetraining_skill`, `stamina`, `skill_fist`, `skill_fist_tries`, `skill_club`, `skill_club_tries`, `skill_sword`, `skill_sword_tries`, `skill_axe`, `skill_axe_tries`, `skill_dist`, `skill_dist_tries`, `skill_shielding`, `skill_shielding_tries`, `skill_fishing`, `skill_fishing_tries`) VALUES
-(1, 'Account Manager', 1, 1, 1, 0, 150, 150, 0, 0, 0, 0, 0, 110, 0, 0, 0, 2, 0, 0, 0, 0, 0, 1, 50, 50, 7, NULL, 400, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 43200, -1, 2520, 10, 0, 10, 0, 10, 0, 10, 0, 10, 0, 10, 0, 10, 0);
 
 CREATE TABLE IF NOT EXISTS `player_autolootconfig` (
   `player_id` int(11) NOT NULL,
