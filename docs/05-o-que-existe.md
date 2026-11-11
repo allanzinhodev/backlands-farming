@@ -94,6 +94,7 @@ Não precisa apagar C++ para desligar um sistema (os flags do `config.lua` basta
 | Área | Feito |
 |---|---|
 | `config.lua.dist` | `reloadCommandEnabled`, `gameStore` e `toggleChainSystem` passam a `false`. `adminPassword` fica `""`, o que desliga o protocolo admin. Os demais sistemas 15.x já vinham desligados. |
+| `data/server_config.lua` | `hirelingSystemEnabled`, `astraHirelingProtocolEnabled`, `resetssystem` e `cleavesystem` passam a `false`, porque os scripts desses sistemas foram removidos. |
 | `monsters/` | Ficam apenas `mammals`, `vermins`, `birds`, `plants` e `trainers` (177 tipos). Saem também `hideous_fungus` e `hive_overseer`, que invocavam monstros de pastas removidas. |
 | `spells/spells_monsters/` | Ficam as 27 magias usadas pelos monstros mantidos. |
 | `spells/` | Saem `familiar` e `soulpit`. As magias de jogador ficam para decisão de design. |
