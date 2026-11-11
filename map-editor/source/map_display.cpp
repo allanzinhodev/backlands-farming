@@ -243,7 +243,7 @@ MapCanvas::MapCanvas(MapWindow* parent, Editor& editor, int* attriblist, bool in
 	editor(editor),
 	ingamePreview(ingamePreview),
 	floor(GROUND_LAYER),
-	zoom(1.0),
+	zoom(DefaultMapZoom),
 	cursor_x(-1),
 	cursor_y(-1),
 	dragging(false),
@@ -3104,7 +3104,7 @@ void MapCanvas::Reset() {
 	cursor_x = 0;
 	cursor_y = 0;
 
-	zoom = 1.0;
+	zoom = DefaultMapZoom;
 	floor = GROUND_LAYER;
 
 	dragging = false;

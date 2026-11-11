@@ -5,7 +5,11 @@
 #include <fstream>
 
 namespace {
-	constexpr size_t SpriteWidth = 32;
+#ifndef NEXAMAP_SPRITE_PIXELS
+	#define NEXAMAP_SPRITE_PIXELS 32
+#endif
+	// Must match SPRITE_PIXELS in definitions.h (set by the CMake option NEXAMAP_SPRITE_PIXELS).
+	constexpr size_t SpriteWidth = NEXAMAP_SPRITE_PIXELS;
 	constexpr size_t SpritePixels = SpriteWidth * SpriteWidth;
 	constexpr size_t SpriteBytes = SpritePixels * 4;
 }

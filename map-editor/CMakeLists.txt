@@ -26,6 +26,15 @@ endif()
 
 option(ENABLE_UNITY_BUILD "Enable unity build for faster compilation" ON)
 
+# Pixels per tile/sprite: 32 for classic Tibia assets, 16 for Backlands assets.
+set(NEXAMAP_SPRITE_PIXELS 32 CACHE STRING "Sprite and tile size in pixels (16 or 32)")
+set_property(CACHE NEXAMAP_SPRITE_PIXELS PROPERTY STRINGS 16 32)
+if(NOT NEXAMAP_SPRITE_PIXELS STREQUAL "16" AND NOT NEXAMAP_SPRITE_PIXELS STREQUAL "32")
+	message(FATAL_ERROR "NEXAMAP_SPRITE_PIXELS must be 16 or 32, got '${NEXAMAP_SPRITE_PIXELS}'")
+endif()
+add_compile_definitions(NEXAMAP_SPRITE_PIXELS=${NEXAMAP_SPRITE_PIXELS})
+message(STATUS "NexaMap sprite size: ${NEXAMAP_SPRITE_PIXELS}px")
+
 if(MSVC AND VCPKG_TARGET_TRIPLET MATCHES "-windows-static$")
 	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()

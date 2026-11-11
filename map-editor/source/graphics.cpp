@@ -807,6 +807,13 @@ bool GraphicManager::loadOTFI(const FileName& filename, wxString& error, wxArray
 				has_transparency = node->valueAt<bool>("transparency");
 				has_frame_durations = node->valueAt<bool>("frame-durations");
 				has_frame_groups = node->valueAt<bool>("frame-groups");
+				// The .spr format does not store sprite dimensions; refuse assets
+				// made for a different sprite size instead of drawing garbage.
+				const int spriteSize = node->valueAt<int>("sprite-size", SPRITE_PIXELS);
+				if (spriteSize != SPRITE_PIXELS) {
+					error += wxString::Format("%s declares sprite-size %d, but this NexaMap build uses %dpx sprites (CMake option NEXAMAP_SPRITE_PIXELS).", otfi.GetFullPath(), spriteSize, SPRITE_PIXELS);
+					return false;
+				}
 				auto metadata = node->valueAt<std::string>("metadata-file", std::string(ASSETS_NAME) + ".dat");
 				auto sprites = node->valueAt<std::string>("sprites-file", std::string(ASSETS_NAME) + ".spr");
 				metadata_file = wxFileName(filename.GetFullPath(), wxString(metadata));
@@ -1471,8 +1478,8 @@ void GraphicManager::readSpriteFlagData(uint8_t flag, uint8_t prev_flag, FileRea
 				sType->drawoffset_x = offset_x;
 				sType->drawoffset_y = offset_y;
 			} else {
-				sType->drawoffset_x = 8;
-				sType->drawoffset_y = 8;
+				sType->drawoffset_x = SPRITE_PIXELS / 4;
+				sType->drawoffset_y = SPRITE_PIXELS / 4;
 			}
 			break;
 		}
@@ -2204,8 +2211,9 @@ wxMemoryDC* GameSprite::getDC(SpriteSize size) {
 			}
 		}
 
-		// Now comes the resizing / antialiasing
-		if (size == SPRITE_SIZE_16x16 || image.GetWidth() > SPRITE_PIXELS || image.GetHeight() > SPRITE_PIXELS) {
+		// Now comes the resizing / antialiasing. Palette icons are 32px, so
+		// 16px builds upscale here (nearest-neighbour keeps pixel art sharp).
+		if (size == SPRITE_SIZE_16x16 || image.GetWidth() != 32 || image.GetHeight() != 32) {
 			int new_size = SPRITE_SIZE_16x16 ? 16 : 32;
 			image.Rescale(new_size, new_size);
 		}

@@ -111,12 +111,24 @@
 #define MAP_MAX_HEIGHT 65000
 #define MAP_MAX_LAYER 15
 
+// Pixels per tile and per sprite. Chosen at build time with the CMake option
+// NEXAMAP_SPRITE_PIXELS (32 = classic Tibia assets, 16 = Backlands assets).
+// The .spr format does not store sprite dimensions, so every sprite in the
+// loaded .spr must have exactly this size.
+#ifndef NEXAMAP_SPRITE_PIXELS
+	#define NEXAMAP_SPRITE_PIXELS 32
+#endif
+static_assert(NEXAMAP_SPRITE_PIXELS == 16 || NEXAMAP_SPRITE_PIXELS == 32, "NEXAMAP_SPRITE_PIXELS must be 16 or 32");
+
 // The size of the tile in pixels
-constexpr int TileSize = 32;
+constexpr int TileSize = NEXAMAP_SPRITE_PIXELS;
 
 // The default size of sprites
-#define SPRITE_PIXELS 32
-#define SPRITE_PIXELS_SIZE SPRITE_PIXELS* SPRITE_PIXELS
+#define SPRITE_PIXELS NEXAMAP_SPRITE_PIXELS
+#define SPRITE_PIXELS_SIZE (SPRITE_PIXELS * SPRITE_PIXELS)
+
+// Initial map zoom: 16px builds start zoomed in so tiles appear at 32px on screen.
+constexpr double DefaultMapZoom = SPRITE_PIXELS / 32.0;
 
 // The sea layer
 #define GROUND_LAYER 7

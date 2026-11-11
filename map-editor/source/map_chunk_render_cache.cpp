@@ -84,12 +84,12 @@ const MapChunkRenderCache::Entry* MapChunkRenderCache::prepare(uint32_t key, uin
 		}
 		prepared.quads[slot] = static_cast<int>(vertices.size() / 4);
 		prepared.textures[slot] = sprite.page.texture;
-		const float x = static_cast<float>((slot / 4) * 32) + quad.offsetX;
-		const float y = static_cast<float>((slot % 4) * 32) + quad.offsetY;
+		const float x = static_cast<float>((slot / 4) * TileSize) + quad.offsetX;
+		const float y = static_cast<float>((slot % 4) * TileSize) + quad.offsetY;
 		vertices.push_back({ x, y, sprite.u0, sprite.v0, 255, 255, 255, 255 });
-		vertices.push_back({ x + 32, y, sprite.u1, sprite.v0, 255, 255, 255, 255 });
-		vertices.push_back({ x + 32, y + 32, sprite.u1, sprite.v1, 255, 255, 255, 255 });
-		vertices.push_back({ x, y + 32, sprite.u0, sprite.v1, 255, 255, 255, 255 });
+		vertices.push_back({ x + TileSize, y, sprite.u1, sprite.v0, 255, 255, 255, 255 });
+		vertices.push_back({ x + TileSize, y + TileSize, sprite.u1, sprite.v1, 255, 255, 255, 255 });
+		vertices.push_back({ x, y + TileSize, sprite.u0, sprite.v1, 255, 255, 255, 255 });
 	}
 	const size_t bytes = vertices.size() * sizeof(GLRenderer::Vertex);
 	const size_t oldCapacity = found == entries.end() ? 0 : found->second.capacity;
@@ -135,7 +135,7 @@ bool MapChunkRenderCache::draw(const Entry& entry, size_t slot, int tileX, int t
 	if (slot >= entry.quads.size() || entry.quads[slot] < 0) {
 		return false;
 	}
-	if (!renderer.drawRetainedQuad(entry.buffer, entry.quads[slot], entry.textures[slot], static_cast<float>(tileX - static_cast<int>(slot / 4) * 32), static_cast<float>(tileY - static_cast<int>(slot % 4) * 32), color)) {
+	if (!renderer.drawRetainedQuad(entry.buffer, entry.quads[slot], entry.textures[slot], static_cast<float>(tileX - static_cast<int>(slot / 4) * TileSize), static_cast<float>(tileY - static_cast<int>(slot % 4) * TileSize), color)) {
 		return false;
 	}
 	++stats.replayedQuads;
