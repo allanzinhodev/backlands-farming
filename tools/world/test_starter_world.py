@@ -1,6 +1,6 @@
 """Validate the generated farm against the actual DAT/OTB and an independent parser."""
 
-from collections import deque
+from collections import Counter, deque
 from pathlib import Path
 import re
 import struct
@@ -13,6 +13,22 @@ from backlands_editor.formats import read_dat, read_otfi
 from backlands_editor.server_items import OtbFile, _read_node
 
 import create_starter_world as world
+
+
+def creature_definitions(kind):
+    directory, constructor = {"npc": ("npc", "createNpcType"),
+                              "monster": ("monsters", "createMonsterType")}[kind]
+    pattern = re.compile(
+        rf"^\s*(?:local\s+\w+\s*=\s*)?Game\s*\.\s*{constructor}"
+        r"\s*\(\s*([\"'])(.*?)\1\s*\)", re.MULTILINE)
+    definitions = {}
+    for source in (world.REPO / "server/data" / directory).rglob("*.lua"):
+        code = source.read_text(encoding="utf-8-sig")
+        # Commented examples must not make a missing creature pass.
+        code = re.sub(r"--\[(=*)\[.*?\]\1\]", "", code, flags=re.DOTALL)
+        for match in pattern.finditer(code):
+            definitions[match.group(2).casefold()] = code
+    return definitions
 
 
 class StarterWorldTests(unittest.TestCase):
@@ -97,21 +113,12 @@ class StarterWorldTests(unittest.TestCase):
                    for spawn in spawns for entity in spawn]
         self.assertEqual(entries, [("npc", n, x, y, 7) for n, x, y in world.NPCS]
                          + [("monster", n, x, y, 7) for n, x, y in world.ANIMALS])
-        self.assertFalse(spawns.findall(".//monster"), "The starter farm has no registered animal types yet.")
+        self.assertEqual(Counter(entity.get("name") for entity in spawns.findall(".//monster")),
+                         {"Chicken": 2, "Pig": 1, "Sheep": 1, "Rabbit": 1, "Rat": 1})
         self.assertEqual(len(ET.fromstring(self.files["world-house.xml"])), 0)
 
     def test_spawn_names_have_real_creature_definitions(self):
-        registered = {"npc": set(), "monster": set()}
-        for kind, directory, constructor in (("npc", "npc", "createNpcType"),
-                                              ("monster", "monsters", "createMonsterType")):
-            pattern = re.compile(
-                rf"^\s*(?:local\s+\w+\s*=\s*)?Game\s*\.\s*{constructor}"
-                r"\s*\(\s*([\"'])(.*?)\1\s*\)", re.MULTILINE)
-            for source in (world.REPO / "server/data" / directory).rglob("*.lua"):
-                code = source.read_text(encoding="utf-8-sig")
-                # Commented examples must not make a missing creature pass.
-                code = re.sub(r"--\[(=*)\[.*?\]\1\]", "", code, flags=re.DOTALL)
-                registered[kind].update(match.group(2).casefold() for match in pattern.finditer(code))
+        registered = {kind: creature_definitions(kind) for kind in ("npc", "monster")}
 
         spawns = ET.parse(world.REPO / "server/data/world/world-spawn.xml").getroot()
         for spawn in spawns:
@@ -121,6 +128,23 @@ class StarterWorldTests(unittest.TestCase):
                                   y=spawn.get("centery")):
                     self.assertIn(name.casefold(), registered[creature.tag],
                                   f"Spawned {creature.tag} {name!r} has no real Lua type definition.")
+
+    def test_spawn_appearances_exist_in_dat(self):
+        definitions = {kind: creature_definitions(kind) for kind in ("npc", "monster")}
+        spawns = ET.parse(world.REPO / "server/data/world/world-spawn.xml").getroot()
+        for spawn in spawns:
+            for creature in spawn:
+                name = creature.get("name", "")
+                with self.subTest(kind=creature.tag, name=name):
+                    code = definitions[creature.tag].get(name.casefold(), "")
+                    match = re.search(r"\blookType\s*=\s*(\d+)", code)
+                    self.assertIsNotNone(match, f"No outfit lookType in {name!r}'s definition.")
+                    looktype = int(match.group(1))
+                    self.assertGreater(looktype, 0)
+                    self.assertLessEqual(looktype, len(self.dat.categories[1]))
+                    outfit = self.dat.categories[1][looktype - 1]
+                    self.assertTrue(any(sprite for group in outfit.groups for sprite in group.sprites),
+                                    f"Outfit {looktype} for {name!r} has no visible sprite references.")
 
     def test_farmer_appearance_exists_in_dat(self):
         root = ET.parse(world.REPO / "server/data/XML/vocations.xml").getroot()

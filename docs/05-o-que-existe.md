@@ -109,14 +109,14 @@ Não precisa apagar C++ para desligar um sistema (os flags do `config.lua` basta
 
 | Área | Feito |
 |---|---|
-| Mundo | Mapa inicial com 2.021 tiles, praça protegida, cabana pública, canteiros, trigo colhível, lago para pesca e pasto reservado para os futuros animais. Entrada em **100, 100, 7**, cidade Backlands. As 61 casas e os spawns antigos saíram. |
+| Mundo | Mapa inicial com 2.021 tiles, praça protegida, cabana pública, canteiros, trigo colhível, lago para pesca e animais de fazenda. Entrada em **100, 100, 7**, cidade Backlands. As 61 casas e os spawns antigos saíram. |
 | Personagem | Uma vocação, **Farmer (0)**, com os dois outfits iniciais. Catálogo de montarias vazio até existir arte própria. Login/logout não dependem mais de promoção. |
 | NPCs e ferramentas | **Seed Vendor** vende insumos e ferramentas; **Harvest Buyer** compra a produção. Primeiro login entrega mochila, foice, vara, minhocas, sementes, vaso, regador e outros suprimentos. Não há duplicação do kit no relogin. |
-| Monstros | O commit `4ecfb462` removeu os 177 tipos restantes e suas 27 magias. A pasta permanece vazia até receber criaturas próprias. O mapa inicial não depende desses tipos. |
-| Magias | Removidos mais 231 scripts de jogador, incluindo as três runas que só eram mantidas por dependência dos monstros. Permanecem seis habilidades básicas para Farmer e quatro comandos de casa. |
+| Monstros | O commit `4ecfb462` removeu os 177 tipos restantes e suas 27 magias. Foram mantidos depois apenas **Chicken, Pig, Sheep, Rabbit e Rat**, conforme a escolha de manter os animais da fazenda. O mapa tem seis animais (duas galinhas), sem depender das magias removidas. |
+| Magias | Removidos mais 231 scripts de jogador, incluindo as três runas que só eram mantidas por dependência dos monstros antigos. Os cinco animais da fazenda não usam essas runas. Permanecem seis habilidades básicas para Farmer e quatro comandos de casa. |
 | Startup | Tabelas de posições/ações do mapa antigo esvaziadas; removidas referências à Dawnport e à quest Demon Helmet. |
 | Configuração | Mundo sem PvP, Account Manager e treino em camas desligados, spawn ajustado ao mapa e comércio/market habilitado. |
-| Verificação | Sete testes do mapa, oito testes Lua (incluindo pesca → venda) e subida real do TFS sem erros Lua nem avisos de spawns ausentes. |
+| Verificação | Oito testes do mapa, oito testes Lua (incluindo pesca → venda) e subida real do TFS sem erros Lua nem avisos de spawns ausentes. |
 
 O gerador e os pontos de teste estão em [tools/world/README.md](../tools/world/README.md).
 As sementes atuais produzem plantas em vasos; o trigo usa o ciclo existente de foice e regeneração.

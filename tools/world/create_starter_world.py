@@ -20,7 +20,9 @@ REPO = Path(__file__).resolve().parents[2]
 SPAWN = (100, 100, 7)
 BOUNDS = (80, 80, 126, 122)
 NPCS = (("Seed Vendor", 102, 98), ("Harvest Buyer", 98, 98))
-ANIMALS = ()
+ANIMALS = (("Chicken", 116, 106), ("Chicken", 119, 108),
+           ("Pig", 118, 112), ("Sheep", 116, 114),
+           ("Rabbit", 89, 111), ("Rat", 115, 93))
 
 # Native ClientIDs verified against the current DAT and server items.otb.
 GRASS, DIRT, WOOD, WATER = 106, 103, 408, 4597
