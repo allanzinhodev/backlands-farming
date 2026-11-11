@@ -1,4 +1,8 @@
-# Cliente web — stack e segurança (planejamento, sem implementação)
+# Cliente web — stack e segurança
+
+O teste local já usa o AstraClient compilado para WebAssembly, com assets 16×16 e
+uma bridge WebSocket → TCP. Para executar, veja [06-astra-web.md](06-astra-web.md).
+As opções abaixo continuam como planejamento para o cliente definitivo.
 
 ## Fato que muda a decisão
 
@@ -56,9 +60,9 @@ processo exposto à internet (memória, limites de frame, backpressure); Node é
 |---|---|---|---|
 | `key.pem` é a **chave RSA pública conhecida do OpenTibia** (a privada está no repo) | raiz do servidor | qualquer um decifra o login | gerar chave nova; o cliente embute só a pública |
 | Senhas com **SHA1 sem salt** | `iologindata.cpp`, `tools.cpp` | vazamento do banco = senhas quebradas | migrar para Argon2id (ou bcrypt) — mudança no servidor |
-| `schema.sql` cria uma **conta padrão** | `INSERT INTO accounts` | conta conhecida em produção | remover |
-| Admin protocol com `adminPassword = "admin"` | `config.lua.dist` | controle do servidor | desligar ou só localhost + senha forte |
-| `reloadCommandEnabled = true` | `config.lua.dist` | GM derruba o servidor | desligar em produção |
+| Conta padrão no schema original | `schema.sql` | conta conhecida em produção | **removida**; o launcher local cria uma conta apenas no banco de desenvolvimento |
+| Protocolo admin | `config.lua.dist` | controle do servidor | **desligado** com `adminPassword = ""` |
+| Comando reload | `config.lua.dist` | GM derruba o servidor | **desligado** com `reloadCommandEnabled = false` |
 
 ### Modelo de ameaça do cliente web
 

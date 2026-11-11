@@ -1,0 +1,16 @@
+{
+  "name": "backlands-astra-web-local",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local AstraClient web host and WebSocket to TFS TCP bridge",
+  "scripts": {
+    "start": "node server.cjs",
+    "test": "node --test server.test.cjs"
+  },
+  "dependencies": {
+    "ws": "8.22.2"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

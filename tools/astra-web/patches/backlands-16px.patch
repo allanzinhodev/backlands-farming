@@ -1,0 +1,97 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9661d03..8e35608 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -68,6 +68,12 @@ else()
+ endif()
+ set_target_properties(${PROJECT_NAME} PROPERTIES
+     CXX_STANDARD 23 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
++if(WASM)
++    target_precompile_headers(${PROJECT_NAME} PRIVATE
++        "$<$<COMPILE_LANGUAGE:CXX>:${CMAKE_SOURCE_DIR}/src/framework/pch.h>")
++    # This file uses -Os instead of -O3; its compiler macros differ from the PCH.
++    set_source_files_properties(src/framework/luafunctions.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
++endif()
+ target_link_libraries(${PROJECT_NAME} ${framework_LIBRARIES})
+ 
+ include(CTest)
+diff --git a/init.lua b/init.lua
+index 339fd62..f6dd822 100644
+--- a/init.lua
++++ b/init.lua
+@@ -1,5 +1,5 @@
+ -- CONFIG
+-APP_NAME = "otclientv8" -- important, change it, it's name for config dir and files in appdata
++APP_NAME = "backlands-astra-local" -- Isolated local browser settings.
+ APP_VERSION = 1341       -- client version for updater and login to identify outdated client
+ DEFAULT_LAYOUT = "" -- on android it's forced to "mobile", check code bellow
+ ENABLE_NATIVE_SPLASH = false -- Windows startup splash: true = enabled, false = disabled
+@@ -24,8 +24,8 @@ Services = {
+ 
+ -- Direct connection to the TFS login server (no HTTP service required).
+ Servers = {
+-  LocalTestServ = {
+-    name = "LocalTestServ",
++  Backlands = {
++    name = "Backlands (local)",
+     host = "127.0.0.1",
+     port = 7171,
+     version = 860
+diff --git a/modules/game_things/things.lua b/modules/game_things/things.lua
+index 50faed3..5057320 100644
+--- a/modules/game_things/things.lua
++++ b/modules/game_things/things.lua
+@@ -172,6 +172,10 @@ function load()
+     spritesU32 = true
+   end
+ 
++  -- Sprite dimensions also determine DAT exact sizes. Read the OTFI/SPR first.
++  if not g_sprites.loadSpr(sprPath) then
++    errorMessage = errorMessage .. tr("Unable to load spr file, please place a valid spr in '%s'", sprPath) .. '\n'
++  end
+   if not g_things.loadDat(datPath) then
+     if not g_game.getFeature(GameSpritesU32) then
+       g_game.enableFeature(GameSpritesU32)
+@@ -183,9 +187,6 @@ function load()
+       errorMessage = errorMessage .. tr("Unable to load dat file, please place a valid dat in '%s'", datPath) .. '\n'
+     end
+   end
+-  if not g_sprites.loadSpr(sprPath) then
+-    errorMessage = errorMessage .. tr("Unable to load spr file, please place a valid spr in '%s'", sprPath)
+-  end
+ 
+   local otmlPath = datPath .. '.otml'
+   if errorMessage:len() == 0 and g_resources.fileExists(otmlPath) then
+diff --git a/src/client/spritemanager.cpp b/src/client/spritemanager.cpp
+index 0ef5fc4..bbb72b0 100644
+--- a/src/client/spritemanager.cpp
++++ b/src/client/spritemanager.cpp
+@@ -36,6 +36,7 @@
+ #include <framework/graphics/xbrz.h>
+ #include <framework/util/crypt.h>
+ #include <framework/util/pngunpacker.h>
++#include <framework/otml/otml.h>
+ 
+ #include <algorithm>
+ #include <new>
+@@ -485,8 +486,19 @@ ImagePtr SpriteManager::upscaleSprite(const ImagePtr& sprite, int scaleFactor) c
+ bool SpriteManager::loadCasualSpr(std::string file)
+ {
+     m_baseSpriteSize = 32;
+-    updateSpriteSize();
+     try {
++        const auto packBase = g_resources.isFileType(file, "spr") ? file.substr(0, file.size() - 4) : file;
++        const auto otfiFile = g_resources.guessFilePath(packBase, "otfi");
++        if (g_resources.fileExists(otfiFile)) {
++            const auto pack = OTMLDocument::parse(otfiFile)->get("DatSpr");
++            if (pack) {
++                const int spriteSize = pack->valueAt<int>("sprite-size", 32);
++                if (spriteSize != 16 && spriteSize != 32)
++                    stdext::throw_exception("Unsupported SPR sprite-size (expected 16 or 32)");
++                m_baseSpriteSize = spriteSize;
++            }
++        }
++        updateSpriteSize();
+         file = g_resources.guessFilePath(file, "spr");
+ 
+         // SPR packs can be hundreds of MiB. Keep only their index and
