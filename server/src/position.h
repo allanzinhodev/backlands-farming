@@ -30,6 +30,11 @@ namespace tfs {
 
 inline constexpr auto abs(std::integral auto num) { return num < 0 ? -num : num; }
 
+// Backlands uses a top-down view: each floor above is drawn one tile higher (Y) with
+// no horizontal shift. Classic Tibia shifts floors diagonally (X and Y), which is
+// FLOOR_SHIFT_X = 1. The client and the map editor must use the same value.
+inline constexpr int32_t FLOOR_SHIFT_X = 0;
+
 } // namespace tfs
 
 struct Position

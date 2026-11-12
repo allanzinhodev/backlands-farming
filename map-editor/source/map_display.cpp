@@ -669,7 +669,7 @@ void MapCanvas::ScreenToMap(int screen_x, int screen_y, int* map_x, int* map_y) 
 	}
 
 	if (floor <= GROUND_LAYER) {
-		*map_x += GROUND_LAYER - floor;
+		*map_x += (GROUND_LAYER - floor) * FloorShiftX;
 		*map_y += GROUND_LAYER - floor;
 	} /* else {
 		 *map_x += MAP_MAX_LAYER - floor;
@@ -1497,10 +1497,10 @@ void MapCanvas::OnMouseActionRelease(wxMouseEvent& event) {
 							end_z = floor;
 
 							if (g_settings.getInteger(Config::COMPENSATED_SELECT)) {
-								start_x -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0);
+								start_x -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0) * FloorShiftX;
 								start_y -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0);
 
-								end_x -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0);
+								end_x -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0) * FloorShiftX;
 								end_y -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0);
 							}
 
@@ -1519,10 +1519,10 @@ void MapCanvas::OnMouseActionRelease(wxMouseEvent& event) {
 							end_z = floor;
 
 							if (g_settings.getInteger(Config::COMPENSATED_SELECT)) {
-								start_x -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0);
+								start_x -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0) * FloorShiftX;
 								start_y -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0);
 
-								end_x -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0);
+								end_x -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0) * FloorShiftX;
 								end_y -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0);
 							}
 							break;
@@ -1982,10 +1982,10 @@ void MapCanvas::OnMousePropertiesRelease(wxMouseEvent& event) {
 					end_z = floor;
 
 					if (g_settings.getInteger(Config::COMPENSATED_SELECT)) {
-						start_x -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0);
+						start_x -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0) * FloorShiftX;
 						start_y -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0);
 
-						end_x -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0);
+						end_x -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0) * FloorShiftX;
 						end_y -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0);
 					}
 
@@ -2000,9 +2000,9 @@ void MapCanvas::OnMousePropertiesRelease(wxMouseEvent& event) {
 							}
 						}
 						if (z <= GROUND_LAYER && g_settings.getInteger(Config::COMPENSATED_SELECT)) {
-							start_x++;
+							start_x += FloorShiftX;
 							start_y++;
-							end_x++;
+							end_x += FloorShiftX;
 							end_y++;
 						}
 					}
@@ -2024,10 +2024,10 @@ void MapCanvas::OnMousePropertiesRelease(wxMouseEvent& event) {
 					end_z = floor;
 
 					if (g_settings.getInteger(Config::COMPENSATED_SELECT)) {
-						start_x -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0);
+						start_x -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0) * FloorShiftX;
 						start_y -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0);
 
-						end_x -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0);
+						end_x -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0) * FloorShiftX;
 						end_y -= (floor < GROUND_LAYER ? GROUND_LAYER - floor : 0);
 					}
 
@@ -2042,9 +2042,9 @@ void MapCanvas::OnMousePropertiesRelease(wxMouseEvent& event) {
 							}
 						}
 						if (z <= GROUND_LAYER && g_settings.getInteger(Config::COMPENSATED_SELECT)) {
-							start_x++;
+							start_x += FloorShiftX;
 							start_y++;
-							end_x++;
+							end_x += FloorShiftX;
 							end_y++;
 						}
 					}

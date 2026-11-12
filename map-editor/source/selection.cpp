@@ -327,9 +327,9 @@ wxThread::ExitCode SelectionThread::Entry() {
 			}
 		}
 		if (z <= GROUND_LAYER && g_settings.getInteger(Config::COMPENSATED_SELECT)) {
-			++start.x;
+			start.x += FloorShiftX;
 			++start.y;
-			++end.x;
+			end.x += FloorShiftX;
 			++end.y;
 		}
 	}

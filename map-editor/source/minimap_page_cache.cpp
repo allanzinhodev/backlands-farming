@@ -118,7 +118,7 @@ bool MinimapPageCache::drawVisible(
 				continue;
 			}
 
-			const float worldX = static_cast<float>(pageX * PageSize * TileSize - viewScrollX - floorAdjustment);
+			const float worldX = static_cast<float>(pageX * PageSize * TileSize - viewScrollX - floorAdjustment * FloorShiftX);
 			const float worldY = static_cast<float>(pageY * PageSize * TileSize - viewScrollY - floorAdjustment);
 			const float worldSize = static_cast<float>(PageSize * TileSize);
 			renderer.drawTexturedQuad(worldX, worldY, worldSize, worldSize, page.texture, { 255, 255, 255, 255 });

@@ -492,11 +492,13 @@ void Map::getSpectatorsInternal(SpectatorVec& spectators, const Position& center
 	auto max_x = centerPos.x + maxRangeX;
 
 	int32_t minoffset = centerPos.getZ() - maxRangeZ;
-	uint16_t x1 = static_cast<uint16_t>(std::min<uint32_t>(0xFFFF, std::max<int32_t>(0, (min_x + minoffset))));
+	uint16_t x1 =
+	    static_cast<uint16_t>(std::min<uint32_t>(0xFFFF, std::max<int32_t>(0, (min_x + minoffset * tfs::FLOOR_SHIFT_X))));
 	uint16_t y1 = static_cast<uint16_t>(std::min<uint32_t>(0xFFFF, std::max<int32_t>(0, (min_y + minoffset))));
 
 	int32_t maxoffset = centerPos.getZ() - minRangeZ;
-	uint16_t x2 = static_cast<uint16_t>(std::min<uint32_t>(0xFFFF, std::max<int32_t>(0, (max_x + maxoffset))));
+	uint16_t x2 =
+	    static_cast<uint16_t>(std::min<uint32_t>(0xFFFF, std::max<int32_t>(0, (max_x + maxoffset * tfs::FLOOR_SHIFT_X))));
 	uint16_t y2 = static_cast<uint16_t>(std::min<uint32_t>(0xFFFF, std::max<int32_t>(0, (max_y + maxoffset))));
 
 	int32_t startx1 = x1 - (x1 % FLOOR_SIZE);
@@ -533,8 +535,9 @@ void Map::getSpectatorsInternal(SpectatorVec& spectators, const Position& center
 					}
 
 					int16_t offsetZ = centerPos.getOffsetZ(cpos);
-					if ((min_y + offsetZ) > cpos.y || (max_y + offsetZ) < cpos.y || (min_x + offsetZ) > cpos.x ||
-					    (max_x + offsetZ) < cpos.x) {
+					int32_t offsetX = offsetZ * tfs::FLOOR_SHIFT_X;
+					if ((min_y + offsetZ) > cpos.y || (max_y + offsetZ) < cpos.y || (min_x + offsetX) > cpos.x ||
+					    (max_x + offsetX) < cpos.x) {
 						continue;
 					}
 

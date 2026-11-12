@@ -2194,7 +2194,7 @@ void ProtocolGame::GetFloorDescription(NetworkMessage& msg, int32_t x, int32_t y
 {
 	for (int32_t nx = 0; nx < width; nx++) {
 		for (int32_t ny = 0; ny < height; ny++) {
-			Tile* tile = g_game.map.getTile(static_cast<uint16_t>(x + nx + offset),
+			Tile* tile = g_game.map.getTile(static_cast<uint16_t>(x + nx + offset * tfs::FLOOR_SHIFT_X),
 			                                static_cast<uint16_t>(y + ny + offset), static_cast<uint8_t>(z));
 			if (tile) {
 				if (skip >= 0) {
@@ -2291,8 +2291,9 @@ bool ProtocolGame::canSee(int32_t x, int32_t y, int32_t z) const
 
 	// negative offset means that the action taken place is on a lower floor than ourself
 	int32_t offsetz = myPos.getZ() - z;
-	if ((x >= myPos.getX() - Map::maxClientViewportX + offsetz) &&
-	    (x <= myPos.getX() + (Map::maxClientViewportX + 1) + offsetz) &&
+	int32_t offsetx = offsetz * tfs::FLOOR_SHIFT_X;
+	if ((x >= myPos.getX() - Map::maxClientViewportX + offsetx) &&
+	    (x <= myPos.getX() + (Map::maxClientViewportX + 1) + offsetx) &&
 	    (y >= myPos.getY() - Map::maxClientViewportY + offsetz) &&
 	    (y <= myPos.getY() + (Map::maxClientViewportY + 1) + offsetz)) {
 		return true;
@@ -7068,10 +7069,12 @@ void ProtocolGame::MoveUpCreature(NetworkMessage& msg, const Creature* creature,
 	}
 
 	// moving up a floor up makes us out of sync
-	// west
-	msg.addByte(0x68);
-	GetMapDescription(oldPos.x - Map::maxClientViewportX, oldPos.y - (Map::maxClientViewportY - 1), newPos.z, 1,
-	                  (Map::maxClientViewportY * 2) + 2, msg);
+	// west (only when floors are shifted horizontally; the client must match FLOOR_SHIFT_X)
+	if constexpr (tfs::FLOOR_SHIFT_X != 0) {
+		msg.addByte(0x68);
+		GetMapDescription(oldPos.x - Map::maxClientViewportX, oldPos.y - (Map::maxClientViewportY - 1), newPos.z, 1,
+		                  (Map::maxClientViewportY * 2) + 2, msg);
+	}
 
 	// north
 	msg.addByte(0x65);
@@ -7120,10 +7123,12 @@ void ProtocolGame::MoveDownCreature(NetworkMessage& msg, const Creature* creatur
 	}
 
 	// moving down a floor makes us out of sync
-	// east
-	msg.addByte(0x66);
-	GetMapDescription(oldPos.x + (Map::maxClientViewportX + 1), oldPos.y - (Map::maxClientViewportY + 1), newPos.z, 1,
-	                  (Map::maxClientViewportY * 2) + 2, msg);
+	// east (only when floors are shifted horizontally; the client must match FLOOR_SHIFT_X)
+	if constexpr (tfs::FLOOR_SHIFT_X != 0) {
+		msg.addByte(0x66);
+		GetMapDescription(oldPos.x + (Map::maxClientViewportX + 1), oldPos.y - (Map::maxClientViewportY + 1), newPos.z,
+		                  1, (Map::maxClientViewportY * 2) + 2, msg);
+	}
 
 	// south
 	msg.addByte(0x67);

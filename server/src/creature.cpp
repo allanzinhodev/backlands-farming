@@ -150,7 +150,8 @@ bool Creature::canSee(const Position& myPos, const Position& pos, int32_t viewRa
 	}
 
 	int32_t offsetz = myPos.getOffsetZ(pos);
-	return (pos.getX() >= myPos.getX() - viewRangeX + offsetz) && (pos.getX() <= myPos.getX() + viewRangeX + offsetz) &&
+	int32_t offsetx = offsetz * tfs::FLOOR_SHIFT_X;
+	return (pos.getX() >= myPos.getX() - viewRangeX + offsetx) && (pos.getX() <= myPos.getX() + viewRangeX + offsetx) &&
 	       (pos.getY() >= myPos.getY() - viewRangeY + offsetz) && (pos.getY() <= myPos.getY() + viewRangeY + offsetz);
 }
 

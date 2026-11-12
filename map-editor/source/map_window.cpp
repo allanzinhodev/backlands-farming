@@ -214,7 +214,7 @@ void MapWindow::SetScreenCenterPosition(const Position& position, bool showIndic
 	int z = target.z;
 	if (target.z <= GROUND_LAYER) {
 		// Compensate for floor offset above ground
-		x -= (GROUND_LAYER - z) * TileSize;
+		x -= (GROUND_LAYER - z) * TileSize * FloorShiftX;
 		y -= (GROUND_LAYER - z) * TileSize;
 	}
 
@@ -242,7 +242,7 @@ void MapWindow::SetScreenCenterPositionInterpolated(const Position& position, in
 	int x = position.x * TileSize + pixelOffsetX;
 	int y = position.y * TileSize + pixelOffsetY;
 	if (position.z <= GROUND_LAYER) {
-		x -= (GROUND_LAYER - position.z) * TileSize;
+		x -= (GROUND_LAYER - position.z) * TileSize * FloorShiftX;
 		y -= (GROUND_LAYER - position.z) * TileSize;
 	}
 	Scroll(x, y, true);

@@ -11,19 +11,22 @@ if (-not (Test-Path -LiteralPath (Join-Path $SourceDirectory '.git'))) {
 }
 $current = (& git -C $SourceDirectory rev-parse HEAD).Trim()
 if ($current -ne $revision) { throw "Expected AstraClient $revision; found $current. Use a separate study checkout." }
-$patchFile = Join-Path $PSScriptRoot 'patches/backlands-16px.patch'
-$previousErrorPreference = $ErrorActionPreference
-try {
-    # A clean checkout is expected to fail this probe. PowerShell 5.1 otherwise
-    # promotes redirected native stderr into a terminating NativeCommandError.
-    $ErrorActionPreference = 'Continue'
-    & git -C $SourceDirectory apply --reverse --check $patchFile 2>$null
-    $patchAlreadyApplied = $LASTEXITCODE -eq 0
-} finally { $ErrorActionPreference = $previousErrorPreference }
-if (-not $patchAlreadyApplied) {
-    & git -C $SourceDirectory apply --check $patchFile
-    if ($LASTEXITCODE -ne 0) { throw 'The Backlands patch conflicts with local changes; nothing was overwritten.' }
-    & git -C $SourceDirectory apply $patchFile
-    if ($LASTEXITCODE -ne 0) { throw 'Could not apply the Backlands patch.' }
+# Applied in order. Each one is skipped when it is already applied.
+foreach ($patchName in @('backlands-16px.patch', 'backlands-topdown.patch')) {
+    $patchFile = Join-Path $PSScriptRoot "patches/$patchName"
+    $previousErrorPreference = $ErrorActionPreference
+    try {
+        # A clean checkout is expected to fail this probe. PowerShell 5.1 otherwise
+        # promotes redirected native stderr into a terminating NativeCommandError.
+        $ErrorActionPreference = 'Continue'
+        & git -C $SourceDirectory apply --reverse --check $patchFile 2>$null
+        $patchAlreadyApplied = $LASTEXITCODE -eq 0
+    } finally { $ErrorActionPreference = $previousErrorPreference }
+    if (-not $patchAlreadyApplied) {
+        & git -C $SourceDirectory apply --check $patchFile
+        if ($LASTEXITCODE -ne 0) { throw "The Backlands patch $patchName conflicts with local changes; nothing was overwritten." }
+        & git -C $SourceDirectory apply $patchFile
+        if ($LASTEXITCODE -ne 0) { throw "Could not apply the Backlands patch $patchName." }
+    }
 }
-Write-Host "AstraClient prepared at $SourceDirectory (16px, protocol 860)."
+Write-Host "AstraClient prepared at $SourceDirectory (16px, top-down floors, protocol 860)."

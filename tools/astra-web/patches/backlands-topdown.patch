@@ -1,0 +1,82 @@
+diff --git a/src/client/mapview.cpp b/src/client/mapview.cpp
+index bef5d75..74f8c60 100644
+--- a/src/client/mapview.cpp
++++ b/src/client/mapview.cpp
+@@ -700,7 +700,7 @@ int MapView::calcLastVisibleFloor()
+ }
+ 
+ Point MapView::transformPositionTo2D(const Position& position, const Position& relativePosition) {
+-    return Point((m_virtualCenterOffset.x + (position.x - relativePosition.x) - (relativePosition.z - position.z)) * g_sprites.spriteSize(),
++    return Point((m_virtualCenterOffset.x + (position.x - relativePosition.x) - (relativePosition.z - position.z) * FLOOR_SHIFT_X) * g_sprites.spriteSize(),
+         (m_virtualCenterOffset.y + (position.y - relativePosition.y) - (relativePosition.z - position.z)) * g_sprites.spriteSize());
+ }
+ 
+diff --git a/src/client/position.cpp b/src/client/position.cpp
+index 8038cfa..8399fec 100644
+--- a/src/client/position.cpp
++++ b/src/client/position.cpp
+@@ -51,7 +51,7 @@ bool Position::down(int n)
+ 
+ bool Position::coveredUp(int n)
+ {
+-    const int nx = x + n;
++    const int nx = x + n * FLOOR_SHIFT_X;
+     const int ny = y + n;
+     const int nz = z - n;
+     if (nx < 0 || nx > 65535 || ny < 0 || ny > 65535 || nz < 0 || nz > g_gameConfig.getMapMaxZ())
+@@ -65,7 +65,7 @@ bool Position::coveredUp(int n)
+ 
+ bool Position::coveredDown(int n)
+ {
+-    const int nx = x - n;
++    const int nx = x - n * FLOOR_SHIFT_X;
+     const int ny = y - n;
+     const int nz = z + n;
+     if (nx < 0 || nx > 65535 || ny < 0 || ny > 65535 || nz < 0 || nz > g_gameConfig.getMapMaxZ())
+diff --git a/src/client/position.h b/src/client/position.h
+index f454c56..1df9e2c 100644
+--- a/src/client/position.h
++++ b/src/client/position.h
+@@ -30,6 +30,11 @@
+ 
+ #include <vector>
+ 
++// Backlands top-down view: each floor above is drawn one tile higher (Y) with no
++// horizontal shift. Classic Tibia shifts floors diagonally, which is FLOOR_SHIFT_X = 1.
++// Must match FLOOR_SHIFT_X in the server (server/src/position.h).
++constexpr int FLOOR_SHIFT_X = 0;
++
+ class Position
+ {
+ public:
+diff --git a/src/client/protocolgameparse.cpp b/src/client/protocolgameparse.cpp
+index aba314e..f562719 100644
+--- a/src/client/protocolgameparse.cpp
++++ b/src/client/protocolgameparse.cpp
+@@ -2760,7 +2760,7 @@ void ProtocolGame::parseFloorChangeUp(const InputMessagePtr& msg)
+     pos.z--;
+ 
+     Position newPos = pos;
+-    newPos.x++;
++    newPos.x += FLOOR_SHIFT_X;
+     newPos.y++;
+     g_map.setCentralPosition(newPos);
+ 
+@@ -2786,7 +2786,7 @@ void ProtocolGame::parseFloorChangeDown(const InputMessagePtr& msg)
+     pos.z++;
+ 
+     Position newPos = pos;
+-    newPos.x--;
++    newPos.x -= FLOOR_SHIFT_X;
+     newPos.y--;
+     g_map.setCentralPosition(newPos);
+ 
+@@ -4742,7 +4742,7 @@ int ProtocolGame::setFloorDescription(const InputMessagePtr& msg, int x, int y,
+ {
+     for (int nx = 0; nx < width; nx++) {
+         for (int ny = 0; ny < height; ny++) {
+-            Position tilePos(x + nx + offset, y + ny + offset, z);
++            Position tilePos(x + nx + offset * FLOOR_SHIFT_X, y + ny + offset, z);
+             if (skip == 0)
+                 skip = setTileDescription(msg, tilePos);
+             else {

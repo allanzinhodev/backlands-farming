@@ -130,6 +130,14 @@ constexpr int TileSize = NEXAMAP_SPRITE_PIXELS;
 // Initial map zoom: 16px builds start zoomed in so tiles appear at 32px on screen.
 constexpr double DefaultMapZoom = SPRITE_PIXELS / 32.0;
 
+// Floor perspective. Top-down (Backlands): each floor above ground is drawn one tile
+// higher, with no horizontal shift. Classic Tibia shifts floors diagonally (up and left).
+// Must match FLOOR_SHIFT_X in the server and the client. CMake option NEXAMAP_TOPDOWN_FLOORS.
+#ifndef NEXAMAP_TOPDOWN_FLOORS
+	#define NEXAMAP_TOPDOWN_FLOORS 1
+#endif
+constexpr int FloorShiftX = NEXAMAP_TOPDOWN_FLOORS ? 0 : 1;
+
 // The sea layer
 #define GROUND_LAYER 7
 

@@ -408,7 +408,7 @@ void MapDrawer::DrawMultiplayer() {
 			return;
 		}
 		const int offset = p.z <= GROUND_LAYER ? (GROUND_LAYER - p.z) * TileSize : 0;
-		const int x = p.x * TileSize - view_scroll_x - offset, y = p.y * TileSize - view_scroll_y - offset;
+		const int x = p.x * TileSize - view_scroll_x - offset * FloorShiftX, y = p.y * TileSize - view_scroll_y - offset;
 		drawRect(x, y, TileSize, TileSize, color, ping ? 4 : 2);
 		MakeTooltip(x, y - 16, label, color.Red(), color.Green(), color.Blue());
 	};
@@ -429,7 +429,7 @@ void MapDrawer::DrawMultiplayer() {
 			continue;
 		}
 		const int offset = r.z <= GROUND_LAYER ? (GROUND_LAYER - r.z) * TileSize : 0;
-		drawRect(r.x1 * TileSize - view_scroll_x - offset, r.y1 * TileSize - view_scroll_y - offset, (r.x2 - r.x1 + 1) * TileSize, (r.y2 - r.y1 + 1) * TileSize, lock.owner == editor.multiplayer->clientId() ? wxColor(80, 220, 130) : wxColor(255, 150, 70), 2);
+		drawRect(r.x1 * TileSize - view_scroll_x - offset * FloorShiftX, r.y1 * TileSize - view_scroll_y - offset, (r.x2 - r.x1 + 1) * TileSize, (r.y2 - r.y1 + 1) * TileSize, lock.owner == editor.multiplayer->clientId() ? wxColor(80, 220, 130) : wxColor(255, 150, 70), 2);
 	}
 }
 
@@ -713,7 +713,7 @@ void MapDrawer::DrawMap() {
 				const int targetMinimumY = mouse_map_y + sourceMinimum.y - sourceAnchor.y;
 				const int targetMaximumX = mouse_map_x + sourceMaximum.x - sourceAnchor.x;
 				const int targetMaximumY = mouse_map_y + sourceMaximum.y - sourceAnchor.y;
-				const int drawX = targetMinimumX * TileSize - view_scroll_x - floorOffset;
+				const int drawX = targetMinimumX * TileSize - view_scroll_x - floorOffset * FloorShiftX;
 				const int drawY = targetMinimumY * TileSize - view_scroll_y - floorOffset;
 				const int drawWidth = std::max(TileSize, (targetMaximumX - targetMinimumX + 1) * TileSize);
 				const int drawHeight = std::max(TileSize, (targetMaximumY - targetMinimumY + 1) * TileSize);
@@ -828,7 +828,7 @@ void MapDrawer::DrawMap() {
 							offset = TileSize * (floor - map_z);
 						}
 
-						int draw_x = ((tile->getX() * TileSize) - view_scroll_x) - offset;
+						int draw_x = ((tile->getX() * TileSize) - view_scroll_x) - offset * FloorShiftX;
 						int draw_y = ((tile->getY() * TileSize) - view_scroll_y) - offset;
 						MakeTooltip(draw_x, draw_y + 8, tooltip.str());
 					}
@@ -860,7 +860,7 @@ void MapDrawer::DrawMap() {
 					Tile* tile = g_gui.secondary_map->getTile(pos);
 					if (autoborderPreview && g_autoborder_preview.IsDeletion(final)) {
 						const int offset = map_z <= GROUND_LAYER ? (GROUND_LAYER - map_z) * TileSize : TileSize * (floor - map_z);
-						const int draw_x = ((map_x * TileSize) - view_scroll_x) - offset;
+						const int draw_x = ((map_x * TileSize) - view_scroll_x) - offset * FloorShiftX;
 						const int draw_y = ((map_y * TileSize) - view_scroll_y) - offset;
 						drawFilledRect(draw_x, draw_y, TileSize, TileSize, wxColour(220, 45, 45, 110));
 					}
@@ -873,7 +873,7 @@ void MapDrawer::DrawMap() {
 							offset = TileSize * (floor - map_z);
 						}
 
-						int draw_x = ((map_x * TileSize) - view_scroll_x) - offset;
+						int draw_x = ((map_x * TileSize) - view_scroll_x) - offset * FloorShiftX;
 						int draw_y = ((map_y * TileSize) - view_scroll_y) - offset;
 
 						// Draw ground
@@ -1132,7 +1132,7 @@ void MapDrawer::DrawDraggingShadow() {
 					offset = TileSize * (floor - pos.z);
 				}
 
-				int draw_x = ((pos.x * TileSize) - view_scroll_x) - offset;
+				int draw_x = ((pos.x * TileSize) - view_scroll_x) - offset * FloorShiftX;
 				int draw_y = ((pos.y * TileSize) - view_scroll_y) - offset;
 
 				// save performance when moving large chunks unzoomed
@@ -1176,7 +1176,7 @@ void MapDrawer::DrawHigherFloors() {
 						offset = TileSize * (floor - map_z);
 					}
 
-					int draw_x = ((map_x * TileSize) - view_scroll_x) - offset;
+					int draw_x = ((map_x * TileSize) - view_scroll_x) - offset * FloorShiftX;
 					int draw_y = ((map_y * TileSize) - view_scroll_y) - offset;
 
 					// Position pos = tile->getPosition();
@@ -1282,9 +1282,9 @@ void MapDrawer::DrawBrush() {
 			int last_click_end_map_x = std::max(canvas->last_click_map_x, mouse_map_x) + 1;
 			int last_click_end_map_y = std::max(canvas->last_click_map_y, mouse_map_y) + 1;
 
-			int last_click_start_sx = last_click_start_map_x * TileSize - view_scroll_x - getFloorAdjustment(floor);
+			int last_click_start_sx = last_click_start_map_x * TileSize - view_scroll_x - getFloorAdjustment(floor) * FloorShiftX;
 			int last_click_start_sy = last_click_start_map_y * TileSize - view_scroll_y - getFloorAdjustment(floor);
-			int last_click_end_sx = last_click_end_map_x * TileSize - view_scroll_x - getFloorAdjustment(floor);
+			int last_click_end_sx = last_click_end_map_x * TileSize - view_scroll_x - getFloorAdjustment(floor) * FloorShiftX;
 			int last_click_end_sy = last_click_end_map_y * TileSize - view_scroll_y - getFloorAdjustment(floor);
 
 			int delta_x = last_click_end_sx - last_click_start_sx;
@@ -1336,7 +1336,7 @@ void MapDrawer::DrawBrush() {
 					for (int y = start_y; y <= end_y; y++) {
 						int cy = y * TileSize - view_scroll_y - getFloorAdjustment(floor);
 						for (int x = start_x; x <= end_x; x++) {
-							int cx = x * TileSize - view_scroll_x - getFloorAdjustment(floor);
+							int cx = x * TileSize - view_scroll_x - getFloorAdjustment(floor) * FloorShiftX;
 							if (brush->isOptionalBorder()) {
 								glColorCheck(brush, Position(x, y, floor));
 							} else if (raw_brush) {
@@ -1350,9 +1350,9 @@ void MapDrawer::DrawBrush() {
 					int last_click_end_map_x = std::max(canvas->last_click_map_x, mouse_map_x) + 1;
 					int last_click_end_map_y = std::max(canvas->last_click_map_y, mouse_map_y) + 1;
 
-					int last_click_start_sx = last_click_start_map_x * TileSize - view_scroll_x - getFloorAdjustment(floor);
+					int last_click_start_sx = last_click_start_map_x * TileSize - view_scroll_x - getFloorAdjustment(floor) * FloorShiftX;
 					int last_click_start_sy = last_click_start_map_y * TileSize - view_scroll_y - getFloorAdjustment(floor);
-					int last_click_end_sx = last_click_end_map_x * TileSize - view_scroll_x - getFloorAdjustment(floor);
+					int last_click_end_sx = last_click_end_map_x * TileSize - view_scroll_x - getFloorAdjustment(floor) * FloorShiftX;
 					int last_click_end_sy = last_click_end_map_y * TileSize - view_scroll_y - getFloorAdjustment(floor);
 
 					glColor(brushColor);
@@ -1396,7 +1396,7 @@ void MapDrawer::DrawBrush() {
 					int cy = y * TileSize - view_scroll_y - getFloorAdjustment(floor);
 					float dy = center_y - y;
 					for (int x = start_x - 1; x <= end_x + 1; x++) {
-						int cx = x * TileSize - view_scroll_x - getFloorAdjustment(floor);
+						int cx = x * TileSize - view_scroll_x - getFloorAdjustment(floor) * FloorShiftX;
 
 						float dx = center_x - x;
 						// printf("%f;%f\n", dx, dy);
@@ -1423,9 +1423,9 @@ void MapDrawer::DrawBrush() {
 			int end_map_x = mouse_map_x + g_gui.GetBrushSize() + 1;
 			int end_map_y = mouse_map_y + g_gui.GetBrushSize() + 1;
 
-			int start_sx = start_map_x * TileSize - view_scroll_x - getFloorAdjustment(floor);
+			int start_sx = start_map_x * TileSize - view_scroll_x - getFloorAdjustment(floor) * FloorShiftX;
 			int start_sy = start_map_y * TileSize - view_scroll_y - getFloorAdjustment(floor);
-			int end_sx = end_map_x * TileSize - view_scroll_x - getFloorAdjustment(floor);
+			int end_sx = end_map_x * TileSize - view_scroll_x - getFloorAdjustment(floor) * FloorShiftX;
 			int end_sy = end_map_y * TileSize - view_scroll_y - getFloorAdjustment(floor);
 
 			int delta_x = end_sx - start_sx;
@@ -1446,14 +1446,14 @@ void MapDrawer::DrawBrush() {
 				glFillQuad(start_sx, end_sy - TileSize, end_sx, end_sy - TileSize, end_sx, end_sy, start_sx, end_sy);
 			}
 		} else if (brush->isDoor()) {
-			int cx = (mouse_map_x)*TileSize - view_scroll_x - getFloorAdjustment(floor);
+			int cx = (mouse_map_x)*TileSize - view_scroll_x - getFloorAdjustment(floor) * FloorShiftX;
 			int cy = (mouse_map_y)*TileSize - view_scroll_y - getFloorAdjustment(floor);
 
 			glColorCheck(brush, Position(mouse_map_x, mouse_map_y, floor));
 			glFillQuad(cx, cy + TileSize, cx + TileSize, cy + TileSize, cx + TileSize, cy, cx, cy);
 		} else if (brush->isCreature()) {
 			int cy = (mouse_map_y)*TileSize - view_scroll_y - getFloorAdjustment(floor);
-			int cx = (mouse_map_x)*TileSize - view_scroll_x - getFloorAdjustment(floor);
+			int cx = (mouse_map_x)*TileSize - view_scroll_x - getFloorAdjustment(floor) * FloorShiftX;
 			CreatureBrush* creature_brush = brush->asCreature();
 			if (creature_brush->canDraw(&editor.map, Position(mouse_map_x, mouse_map_y, floor))) {
 				BlitCreature(cx, cy, creature_brush->getType()->outfit, SOUTH, 255, 255, 255, 160);
@@ -1469,7 +1469,7 @@ void MapDrawer::DrawBrush() {
 			for (int y = -g_gui.GetBrushSize() - 1; y <= g_gui.GetBrushSize() + 1; y++) {
 				int cy = (mouse_map_y + y) * TileSize - view_scroll_y - getFloorAdjustment(floor);
 				for (int x = -g_gui.GetBrushSize() - 1; x <= g_gui.GetBrushSize() + 1; x++) {
-					int cx = (mouse_map_x + x) * TileSize - view_scroll_x - getFloorAdjustment(floor);
+					int cx = (mouse_map_x + x) * TileSize - view_scroll_x - getFloorAdjustment(floor) * FloorShiftX;
 					if (g_gui.GetBrushShape() == BRUSHSHAPE_SQUARE) {
 						if (x >= -g_gui.GetBrushSize() && x <= g_gui.GetBrushSize() && y >= -g_gui.GetBrushSize() && y <= g_gui.GetBrushSize()) {
 							if (brush->isRaw()) {
@@ -1879,7 +1879,7 @@ void MapDrawer::DrawIngamePreviewPlayer() {
 	}
 
 	const int floorOffset = position.z <= GROUND_LAYER ? (GROUND_LAYER - position.z) * TileSize : TileSize * (floor - position.z);
-	const int drawX = position.x * TileSize - view_scroll_x - floorOffset + canvas->ingamePreviewWalkOffsetX;
+	const int drawX = position.x * TileSize - view_scroll_x - floorOffset * FloorShiftX + canvas->ingamePreviewWalkOffsetX;
 	const int drawY = position.y * TileSize - view_scroll_y - floorOffset + canvas->ingamePreviewWalkOffsetY;
 
 	drawRect(drawX + 2, drawY + 2, TileSize - 4, TileSize - 4, wxColour(70, 210, 255, 190), 1);
@@ -2274,7 +2274,7 @@ void MapDrawer::DrawTile(TileLocation* location, const MapChunkGroundQuad* groun
 		offset = TileSize * (floor - map_z);
 	}
 
-	int draw_x = ((map_x * TileSize) - view_scroll_x) - offset;
+	int draw_x = ((map_x * TileSize) - view_scroll_x) - offset * FloorShiftX;
 	int draw_y = ((map_y * TileSize) - view_scroll_y) - offset;
 
 	uint8_t r = 255, g = 255, b = 255;
@@ -2455,9 +2455,9 @@ void MapDrawer::DrawTile(TileLocation* location, const MapChunkGroundQuad* groun
 			// tooltips
 			if (show_tooltips) {
 				if (location->getWaypointCount() > 0) {
-					MakeTooltip(map_x * TileSize - view_scroll_x - offset, map_y * TileSize - view_scroll_y - offset, tooltip.str(), 0, 255, 0);
+					MakeTooltip(map_x * TileSize - view_scroll_x - offset * FloorShiftX, map_y * TileSize - view_scroll_y - offset, tooltip.str(), 0, 255, 0);
 				} else {
-					MakeTooltip(map_x * TileSize - view_scroll_x - offset, map_y * TileSize - view_scroll_y - offset, tooltip.str());
+					MakeTooltip(map_x * TileSize - view_scroll_x - offset * FloorShiftX, map_y * TileSize - view_scroll_y - offset, tooltip.str());
 				}
 			}
 			tooltip.str("");
@@ -2568,7 +2568,7 @@ void MapDrawer::DrawPositionIndicator(int z) {
 		offset = TileSize * (floor - pos_indicator.z);
 	}
 
-	const int x = ((pos_indicator.x * TileSize) - view_scroll_x) - offset;
+	const int x = ((pos_indicator.x * TileSize) - view_scroll_x) - offset * FloorShiftX;
 	const int y = ((pos_indicator.y * TileSize) - view_scroll_y) - offset;
 	const int size = static_cast<int>(TileSize * (0.3f + std::abs(500 - time % 1000) / 1000.f));
 	const int borderOffset = (TileSize - size) / 2;
@@ -2651,7 +2651,7 @@ void MapDrawer::DrawHoverTooltip() {
 		return;
 	}
 	const int offset = floor <= GROUND_LAYER ? (GROUND_LAYER - floor) * TileSize : 0;
-	const int x = mouse_map_x * TileSize - view_scroll_x - offset;
+	const int x = mouse_map_x * TileSize - view_scroll_x - offset * FloorShiftX;
 	const int y = mouse_map_y * TileSize - view_scroll_y - offset;
 	// The hovered tile is resolved each overlay pass, including FBO cache hits
 	// and the medium/far LOD paths. Never retain Item* across frames/sessions.
@@ -2741,7 +2741,7 @@ void MapDrawer::DrawContainerPreview() {
 	}
 	const size_t itemCount = container->getItemCount();
 	const int offset = floor <= GROUND_LAYER ? (GROUND_LAYER - floor) * TileSize : 0;
-	const float tileX = (mouse_map_x * TileSize - view_scroll_x - offset) / zoom;
+	const float tileX = (mouse_map_x * TileSize - view_scroll_x - offset * FloorShiftX) / zoom;
 	const float tileY = (mouse_map_y * TileSize - view_scroll_y - offset) / zoom;
 	const std::string name = container->getName().empty() ? "Container " + std::to_string(container->getID()) : container->getName();
 

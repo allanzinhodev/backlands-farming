@@ -385,7 +385,7 @@ void MinimapCanvas::DrawViewport(wxDC& dc, MapCanvas& mapCanvas, const wxRect& m
 		mapCanvas.GetViewBox(&viewScrollX, &viewScrollY, &screenSizeX, &screenSizeY);
 		const int tileSize = std::max(1, static_cast<int>(TileSize / mapCanvas.GetZoom()));
 		const int floorOffset = floor > GROUND_LAYER ? 0 : GROUND_LAYER - floor;
-		const int viewStartX = viewScrollX / TileSize + floorOffset;
+		const int viewStartX = viewScrollX / TileSize + floorOffset * FloorShiftX;
 		const int viewStartY = viewScrollY / TileSize + floorOffset;
 		const int viewEndX = viewStartX + screenSizeX / tileSize + 1;
 		const int viewEndY = viewStartY + screenSizeY / tileSize + 1;
